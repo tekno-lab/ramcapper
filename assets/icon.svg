@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4f8bff"/>
+      <stop offset="1" stop-color="#8b5cf6"/>
+    </linearGradient>
+    <linearGradient id="chip" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5b8def"/>
+      <stop offset="1" stop-color="#7a5be0"/>
+    </linearGradient>
+  </defs>
+  <rect x="16" y="16" width="480" height="480" rx="112" fill="url(#bg)"/>
+  <!-- memory module -->
+  <rect x="72" y="212" width="368" height="170" rx="22" fill="#ffffff"/>
+  <rect x="104" y="244" width="84" height="84" rx="12" fill="url(#chip)"/>
+  <rect x="214" y="244" width="84" height="84" rx="12" fill="url(#chip)"/>
+  <rect x="324" y="244" width="84" height="84" rx="12" fill="url(#chip)"/>
+  <!-- contacts -->
+  <g fill="#ffffff">
+    <rect x="96" y="394" width="26" height="40" rx="5"/><rect x="134" y="394" width="26" height="40" rx="5"/>
+    <rect x="172" y="394" width="26" height="40" rx="5"/><rect x="210" y="394" width="26" height="40" rx="5"/>
+    <rect x="276" y="394" width="26" height="40" rx="5"/><rect x="314" y="394" width="26" height="40" rx="5"/>
+    <rect x="352" y="394" width="26" height="40" rx="5"/><rect x="390" y="394" width="26" height="40" rx="5"/>
+  </g>
+  <!-- the cap: a limit line with end stops above the module -->
+  <rect x="72" y="146" width="368" height="22" rx="11" fill="#ffb347"/>
+  <rect x="72" y="126" width="22" height="62" rx="9" fill="#ffb347"/>
+  <rect x="418" y="126" width="22" height="62" rx="9" fill="#ffb347"/>
+</svg>
