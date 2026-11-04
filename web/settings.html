@@ -32,6 +32,16 @@
     </div>
   </div>
   <section class="card">
+    <h3>Shortcuts &amp; pinning</h3>
+    <div class="sub">Open RamCapper from the Start menu or desktop, or pin it to the taskbar.</div>
+    <table style="margin-top:8px"><tbody>
+      <tr><td><b>Start menu</b><div class="sub">Adds RamCapper to your apps list, so it shows up when you search Start.</div></td><td class="r"><span id="sc-start-st" class="sub"></span> <button class="btn sm primary" id="sc-start">Add</button> <button class="btn sm hide" id="sc-start-show">Show</button></td></tr>
+      <tr><td><b>Desktop</b><div class="sub">A RamCapper icon on your desktop.</div></td><td class="r"><span id="sc-desktop-st" class="sub"></span> <button class="btn sm primary" id="sc-desktop">Add</button></td></tr>
+      <tr><td><b>Taskbar</b><div class="sub">Windows doesn't allow apps to pin themselves. Add the Start menu shortcut, then press Start, type <b>RamCapper</b>, right-click it and choose <b>Pin to taskbar</b>.</div></td><td class="r"><span class="sub">manual</span></td></tr>
+    </tbody></table>
+    <div class="sub" id="sc-note" style="margin-top:8px"></div>
+  </section>
+  <section class="card">
     <h3>About</h3>
     <div class="kv" id="about"></div>
     <div class="sub" style="margin-top:12px">Only one copy of RamCapper runs at a time. Starting it again just brings the existing window to the front. A newer version replaces an older one that is still running.</div>
@@ -49,6 +59,18 @@ window.onInfo=i=>{
     .map(([k,v])=>`<span>${k}</span><span style="word-break:break-all">${esc(v)}</span>`).join('');
 };
 $('#i-elev').onclick=elevate;
+let SC={start:false,desktop:false};
+function showSC(st){
+  SC=st;
+  ['start','desktop'].forEach(w=>{$('#sc-'+w).textContent=st[w]?'Remove':'Add';$('#sc-'+w).classList.toggle('primary',!st[w]);$('#sc-'+w+'-st').textContent=st[w]?'Added':''});
+  $('#sc-start-show').classList.toggle('hide',!st.start);
+  $('#sc-note').textContent=st.frozen?'The shortcuts point to this exe. If you move RamCapper.exe, remove and add them again.':'Running from source: the shortcuts start ramcapper.py with pythonw.';
+}
+async function scSet(where,on){try{showSC(await api('/api/shortcut',{where,enabled:on}));toast(on?'Shortcut added':'Shortcut removed')}catch(e){toast(e.message)}}
+$('#sc-start').onclick=()=>scSet('start',!SC.start);
+$('#sc-desktop').onclick=()=>scSet('desktop',!SC.desktop);
+$('#sc-start-show').onclick=()=>api('/api/shortcut',{where:'start',reveal:true});
+api('/api/shortcuts').then(showSC).catch(()=>{});
 async function relocate(body,ask){
   if(!confirm(ask))return;
   try{const r=await api('/api/relocate',body);waitForRestart('Moved to '+r.dest+'<br><span style="font-size:13px">'+(r.note.join(', ')||'data copied')+' — restarting…</span>')}catch(e){toast(e.message)}

@@ -29,6 +29,7 @@
 - **Tray icon** – RamCapper keeps running when you close its window; the notification-area icon opens the dashboard (click) or quits (right-click). Start with `--no-tray` to disable it.
 - **Storage tab** *(opt-in)* – scan a drive or folder to see what takes the most space: drill-down folders, largest files, breakdown by file type. Read-only.
 - **One page per tab** – a sidebar layout with separate pages for Memory, Limiter, Network, Storage, Events and Settings.
+- **Shortcuts** – add RamCapper to the Start menu or desktop from Settings, then pin it to the taskbar from there (Windows does not let apps pin themselves).
 - **Single instance** – starting RamCapper again (or clicking the tray icon) just focuses the open window; a newer version automatically replaces an older one that is still running. (Task Manager shows two `RamCapper.exe` entries for the one-file build – that is PyInstaller's launcher plus the app, not two copies.)
 - **Portable** – single `.exe`, no installer. History and settings live in a folder you choose.
 - **Safe by design** – clipboard owners are never trimmed, critical Windows processes can't be ended, and the web UI only listens on `127.0.0.1`.

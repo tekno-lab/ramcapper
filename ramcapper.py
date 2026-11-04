@@ -26,7 +26,7 @@ from urllib.parse import parse_qs, urlparse
 
 import psutil
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 FROZEN = getattr(sys, "frozen", False)
 HERE = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))   # bundled resources
 APP_DIR = os.path.dirname(sys.executable) if FROZEN else os.path.dirname(os.path.abspath(__file__))
@@ -1655,6 +1655,8 @@ class Handler(BaseHTTPRequestHandler):
                     size = 0
                 return self._send(200, {"admin": ADMIN, "data_dir": DATA_DIR, "data_source": DATA_SOURCE, "app_dir": APP_DIR,
                                         "db_size": size, "frozen": FROZEN, "port": PORT, "version": VERSION})
+            if u.path == "/api/shortcuts":
+                return self._send(200, shortcut_state())
             if u.path == "/api/net":
                 if not module_on("network"):
                     return self._send(409, {"error": "network module is off"})
@@ -1719,6 +1721,20 @@ class Handler(BaseHTTPRequestHandler):
                     Net.force_ident = True      # a manual scan re-identifies every device
                     threading.Thread(target=net_scan, daemon=True).start()
                 return self._send(200, {})
+            if path == "/api/shortcut":
+                where = body.get("where")
+                if where not in ("start", "desktop"):
+                    return self._send(400, {"error": "bad target"})
+                if body.get("reveal"):
+                    lnk = shortcut_path(where)
+                    if os.path.exists(lnk):
+                        subprocess.Popen(["explorer", f"/select,{lnk}"])
+                    return self._send(200, shortcut_state())
+                try:
+                    set_shortcut(where, bool(body.get("enabled")))
+                except Exception as e:
+                    return self._send(400, {"error": f"Could not change the shortcut: {e}"})
+                return self._send(200, shortcut_state())
             if path == "/api/show":          # a second launch / the tray asks for the window
                 show_window()
                 return self._send(200, {})
@@ -1841,6 +1857,43 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, {"error": "not found"})
 
 
+def shortcut_path(where):
+    if where == "start":
+        base = os.path.join(os.environ.get("APPDATA", ""), "Microsoft", "Windows", "Start Menu", "Programs")
+    else:
+        base = os.path.join(os.environ.get("USERPROFILE", ""), "Desktop")
+        if not os.path.isdir(base):
+            base = os.path.join(os.environ.get("USERPROFILE", ""), "OneDrive", "Desktop")
+    return os.path.join(base, "RamCapper.lnk")
+
+
+def shortcut_state():
+    return {"start": os.path.exists(shortcut_path("start")), "desktop": os.path.exists(shortcut_path("desktop")),
+            "frozen": FROZEN, "start_dir": os.path.dirname(shortcut_path("start"))}
+
+
+def set_shortcut(where, on):
+    path = shortcut_path(where)
+    if not on:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        return
+    if FROZEN:
+        target, args, icon = sys.executable, "", sys.executable
+    else:
+        pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+        target = pyw if os.path.exists(pyw) else sys.executable
+        args = '"' + os.path.abspath(__file__) + '"'
+        icon = os.path.join(HERE, "assets", "ramcapper.ico")
+    script = ("$s=(New-Object -ComObject WScript.Shell).CreateShortcut(%s);$s.TargetPath=%s;$s.Arguments=%s;$s.WorkingDirectory=%s;"
+              "$s.IconLocation=%s;$s.Description='RamCapper - RAM monitor and limiter';$s.Save()"
+              % (_psq(path), _psq(target), _psq(args), _psq(APP_DIR), _psq(icon)))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    _ps(script)
+
+
 def open_window():
     url = f"http://127.0.0.1:{PORT}/"
     for exe in (shutil.which("msedge"),
@@ -1912,11 +1965,19 @@ def focus_ui_window():
     return True
 
 
+SHOW_LOCK = threading.Lock()
+LAST_OPEN = [0.0]
+
+
 def show_window():
     """Open the dashboard, or focus it if it is already open (never a second window)."""
-    if time.time() - UI_SEEN[0] < 6 and focus_ui_window():
-        return
-    open_window()
+    with SHOW_LOCK:
+        if focus_ui_window():
+            return
+        if time.time() - LAST_OPEN[0] < 8:         # a window was launched a moment ago and is still loading
+            return
+        LAST_OPEN[0] = time.time()
+        open_window()
 
 
 def ask_running_to_show():
@@ -2099,8 +2160,8 @@ def _tray_thread(first_balloon):
     def wndproc(hwnd, msg, wparam, lparam):
         if msg == WM_TRAY:
             ev = lparam & 0xFFFF
-            if ev in (0x0202, 0x0203):                       # left click / double click -> open the dashboard
-                show_window()
+            if ev == 0x0202:                                 # left click -> open (or focus) the dashboard
+                threading.Thread(target=show_window, daemon=True).start()
             elif ev in (0x0205, 0x007B):                     # right click -> menu
                 pt = wintypes.POINT()
                 user32.GetCursorPos(ctypes.byref(pt))

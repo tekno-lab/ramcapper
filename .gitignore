@@ -12,3 +12,4 @@ datadir.txt
 # local build output (publish via GitHub Releases instead)
 RamCapper.exe
 _t*/
+Screenshot*.png
