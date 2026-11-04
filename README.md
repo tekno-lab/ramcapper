@@ -13,8 +13,9 @@
 
 ## Features
 
-- **Live memory dashboard** – system gauge plus a stacked timeline of the top apps (5 min → 3 days). Hover for exact values at any moment; limiter actions are marked on the timeline.
-- **Per-app view** – processes grouped by executable with icons, trend sparklines, 5-minute change and per-process drill-down.
+### Memory
+- **Live dashboard** – system gauge plus a stacked timeline of the top apps (5 min → 3 days). Hover for exact values at any moment; limiter actions are marked on the timeline.
+- **Per-app view** – processes grouped by executable with icons, trend sparklines, 5-minute change and per-process drill-down. **Optimize now** trims idle memory from every reachable process.
 - **Limiter** – set a limit per app (all its processes combined) with one of four actions:
   | Action | What it does |
   |---|---|
@@ -23,21 +24,32 @@
   | **Hard cap** | Windows enforces a working-set ceiling per process (limit ÷ process count). The app pages instead of growing; no crash. |
   | **Terminate** | Ends the app after it stays over its limit for N checks (2 s each). |
 - **Emergency auto-trim** – trims every reachable process when system RAM crosses a threshold you choose.
-- **Network tab** *(opt-in)* – live connections per app, throughput chart, and a scan of devices on your local subnet with new-device alerts. Devices are identified by hostname (NetBIOS, mDNS, router DNS), UPnP description, a MAC-vendor database and a light port fingerprint (router, printer, Chromecast, IoT…). Click ✎ to give any device your own name.
-- **Per-app bandwidth** – real-time download/upload per app (TCP and UDP) with session totals, sorted busiest-first. Uses Windows ETW, which requires administrator rights. Every table can be sorted by column and columns can be hidden from the ⋮ menu (remembered).
-- **Network limits & kill** – per-app **Throttle upload** (Windows QoS) or **Block internet** (Windows Firewall rule), plus Kill for an app or a single connection's process. Limits need administrator rights; download speed can't be limited natively by Windows.
+- **Kill** – end an app (all its processes) straight from the app list.
+
+### Network *(opt-in)*
+- **Per-app bandwidth** – real-time download/upload per app (TCP and UDP) with session totals, sorted busiest-first. Uses Windows ETW, which requires administrator rights.
+- **Connections** – live connections per app, throughput chart, and an **End** button per connection's process.
+- **Device discovery** – scans your local subnet and alerts on new devices. Devices are identified by hostname (NetBIOS, mDNS, router DNS), UPnP description, a MAC-vendor database and a light port fingerprint (router, printer, Chromecast, IoT…). Click ✎ to give any device your own name.
+- **Network limits** – per-app **Throttle upload** (Windows QoS) or **Block internet** (Windows Firewall rule), plus **Kill**. Limits need administrator rights; download speed can't be limited natively by Windows.
+
+### Storage *(opt-in)*
+- Scan a drive or folder to see what takes the most space: drill-down folders, largest files, breakdown by file type. Read-only.
+
+### App experience
+- **One page per tab** – sidebar navigation with separate pages for Memory, Limiter, Network, Storage, Events and Settings; live system RAM and RamCapper's own resource use are always visible in the sidebar.
+- **Sortable tables with hideable columns** – click a header to sort; the ⋮ menu in a table's last header shows or hides columns (Odoo-style). Your choices are remembered.
 - **Tray icon** – RamCapper keeps running when you close its window; the notification-area icon opens the dashboard (click) or quits (right-click). Start with `--no-tray` to disable it.
-- **Storage tab** *(opt-in)* – scan a drive or folder to see what takes the most space: drill-down folders, largest files, breakdown by file type. Read-only.
-- **One page per tab** – a sidebar layout with separate pages for Memory, Limiter, Network, Storage, Events and Settings.
-- **Shortcuts** – add RamCapper to the Start menu or desktop from Settings, then pin it to the taskbar from there (Windows does not let apps pin themselves).
-- **Single instance** – starting RamCapper again (or clicking the tray icon) just focuses the open window; a newer version automatically replaces an older one that is still running. (Task Manager shows two `RamCapper.exe` entries for the one-file build – that is PyInstaller's launcher plus the app, not two copies.)
-- **Portable** – single `.exe`, no installer. History and settings live in a folder you choose.
+- **Close window vs. Quit** – *Close window* only closes the dashboard (monitoring and limits keep running); *Quit* exits completely.
+- **Single instance** – starting RamCapper again, or clicking the tray icon, focuses the open window instead of opening another. A newer version automatically replaces an older one that is still running. (Task Manager shows two `RamCapper.exe` entries for the one-file build – that is PyInstaller's launcher plus the app, not two copies.)
+- **Shortcuts** – add RamCapper to the Start menu or desktop from **Settings**, then pin it to the taskbar from there (Windows does not let apps pin themselves).
+- **Administrator mode** – restart elevated from the app (UAC prompt) to manage elevated/system processes, see per-app bandwidth and create network limits.
+- **Portable** – single `.exe`, no installer. History and settings live in a folder you choose, which can be moved from Settings.
 - **Safe by design** – clipboard owners are never trimmed, critical Windows processes can't be ended, and the web UI only listens on `127.0.0.1`.
 
 ## Quick start
 
 ### Download
-Grab `RamCapper.exe` from the [Releases](../../releases) page and run it. A window opens; the app keeps running in the background until you press **Quit**.
+Grab `RamCapper.exe` from the [Releases](../../releases) page and run it. A window opens; the app keeps running in the background (tray icon) until you press **Quit**.
 
 > The executable is not code-signed, so Windows SmartScreen may warn on first run ("More info → Run anyway"). Some antivirus products flag PyInstaller binaries; building from source (below) avoids that.
 
@@ -128,7 +140,7 @@ You can also restart as administrator and move the data folder from the **Settin
 ## Limitations
 
 - Windows only.
-- Per-process network bandwidth isn't available without ETW/driver support; throughput is whole-machine.
+- Per-app bandwidth needs administrator rights (it uses an ETW trace); without them only whole-machine throughput and connection counts are shown.
 - Without administrator rights, protected and elevated processes can't be trimmed, capped or ended.
 - Local-network discovery is a ping sweep of your own `/24` plus the ARP table, so devices that block ping and haven't talked to you recently may not appear.
 
