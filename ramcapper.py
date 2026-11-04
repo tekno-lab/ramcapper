@@ -221,6 +221,7 @@ def load_cfg():
         c.setdefault("rules", [])
         c.setdefault("global", dict(DEFAULT_CFG["global"]))
         c.setdefault("modules", dict(DEFAULT_CFG["modules"]))
+        c.setdefault("netrules", [])
         return c
     except Exception:
         return json.loads(json.dumps(DEFAULT_CFG))
@@ -1151,7 +1152,82 @@ def net_payload():
     conns = net_connections()
     return {"conns": conns, "rate": [[round(t), d, u] for t, d, u in rate], "total_down": io.bytes_recv, "total_up": io.bytes_sent,
             "devices": net_devices(), "scanning": Net.scanning, "scan_finished": Net.scan_finished,
-            "subnet": Net.subnet, "my_ip": Net.my_ip}
+            "subnet": Net.subnet, "my_ip": Net.my_ip, "admin": ADMIN,
+            "netrules": [dict(r, status=NET_STATUS.get(r["id"], "")) for r in CFG.get("netrules", [])]}
+
+
+# ---- network limits: upload throttle (Windows QoS policy) and internet block (Windows Firewall rule). Need admin.
+NETMODES = {"throttle", "block"}
+NET_STATUS = {}       # rule id -> "" (ok) or an error message
+SAFE_EXE = re.compile(r"^[A-Za-z0-9._\- ()]{1,80}$")
+
+
+def _ps(script, timeout=40):
+    r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
+                       capture_output=True, text=True, timeout=timeout, creationflags=NOWIN)
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr or r.stdout).strip().splitlines()[0] if (r.stderr or r.stdout).strip() else "PowerShell failed")
+    return r.stdout
+
+
+def _psq(s):
+    return "'" + str(s).replace("'", "''") + "'"
+
+
+def exe_paths(name):
+    out = set()
+    for p in psutil.process_iter(["name", "exe"]):
+        if (p.info["name"] or "").lower() == name.lower() and p.info.get("exe"):
+            out.add(p.info["exe"])
+    return sorted(out)
+
+
+def net_rule_remove(rule):
+    n = _psq("RamCapper-" + rule["id"])
+    _ps(f"Get-NetQosPolicy -PolicyStore ActiveStore -Name {n} -ErrorAction SilentlyContinue | Remove-NetQosPolicy -PolicyStore ActiveStore -Confirm:$false; "
+        f"Get-NetFirewallRule -Name {n} -ErrorAction SilentlyContinue | Remove-NetFirewallRule")
+
+
+def net_rule_apply(rule):
+    """(Re)create the Windows policy for one rule. Raises RuntimeError with a readable message on failure."""
+    if not ADMIN:
+        raise RuntimeError("Administrator rights are required - use 'Restart as administrator'")
+    if not SAFE_EXE.match(rule["name"]):
+        raise RuntimeError("Unsupported app name")
+    net_rule_remove(rule)
+    n = _psq("RamCapper-" + rule["id"])
+    if rule["mode"] == "throttle":
+        bps = int(rule["kbps"]) * 1000
+        _ps(f"New-NetQosPolicy -Name {n} -AppPathNameMatchCondition {_psq(rule['name'])} -ThrottleRateActionBitsPerSecond {bps} -PolicyStore ActiveStore | Out-Null")
+    else:
+        paths = exe_paths(rule["name"]) or ([rule["path"]] if rule.get("path") else [])
+        if not paths:
+            raise RuntimeError("Start the app once so RamCapper can find its program file")
+        rule["path"] = paths[0]
+        for i, p in enumerate(paths):
+            _ps(f"New-NetFirewallRule -Name {_psq('RamCapper-' + rule['id'] + ('' if i == 0 else '-' + str(i)))} "
+                f"-DisplayName {_psq('RamCapper block ' + rule['name'])} -Program {_psq(p)} -Direction Outbound -Action Block | Out-Null")
+
+
+def clean_netrule(r):
+    name = str(r.get("name", "")).strip().lower()
+    mode = r.get("mode")
+    if not name or mode not in NETMODES or not SAFE_EXE.match(name):
+        raise ValueError("Choose an app and a mode")
+    out = {"id": str(r.get("id") or uuid.uuid4().hex[:8]), "name": name, "mode": mode, "enabled": bool(r.get("enabled", True)),
+           "kbps": max(8, min(int(r.get("kbps", 1000)), 10_000_000)), "path": str(r.get("path", ""))}
+    return out
+
+
+def reapply_net_rules():
+    """QoS policies live in the ActiveStore and vanish at reboot; put enabled ones back when RamCapper starts."""
+    for r in list(CFG.get("netrules", [])):
+        if r["enabled"] and r["mode"] == "throttle":
+            try:
+                net_rule_apply(r)
+                NET_STATUS[r["id"]] = ""
+            except Exception as e:
+                NET_STATUS[r["id"]] = str(e)
 
 
 # ---------------------------------------------------------------- storage module
@@ -1281,6 +1357,7 @@ SERVER = {}
 def quit_app():
     """Release hard caps, flush the DB and exit the whole process."""
     try:
+        tray_remove()
         release_caps()
         with wlock:
             wdb.commit()
@@ -1384,6 +1461,7 @@ class Handler(BaseHTTPRequestHandler):
                 new = clean_cfg(body)
                 with cfg_lock:
                     new["modules"] = CFG.get("modules", dict(DEFAULT_CFG["modules"]))
+                    new["netrules"] = CFG.get("netrules", [])
                     CFG = new
                     save_cfg()
                 return self._send(200, new)
@@ -1411,6 +1489,46 @@ class Handler(BaseHTTPRequestHandler):
                     Net.force_ident = True      # a manual scan re-identifies every device
                     threading.Thread(target=net_scan, daemon=True).start()
                 return self._send(200, {})
+            if path == "/api/closing":       # the window is about to close: tell the user the app is still running
+                tray_balloon("RamCapper is still running", "Monitoring and limits stay active. Click the tray icon to reopen, or right-click to quit.")
+                return self._send(200, {})
+            if path == "/api/netrule":
+                if not module_on("network"):
+                    return self._send(409, {"error": "network module is off"})
+                act = body.get("action")
+                with cfg_lock:
+                    rules = CFG.setdefault("netrules", [])
+                    try:
+                        if act == "add":
+                            r = clean_netrule(body.get("rule", {}))
+                            for old in [x for x in rules if x["name"] == r["name"] and x["mode"] == r["mode"]]:
+                                if ADMIN:
+                                    net_rule_remove(old)
+                                rules.remove(old)
+                            net_rule_apply(r)
+                            NET_STATUS[r["id"]] = ""
+                            rules.append(r)
+                        else:
+                            r = next((x for x in rules if x["id"] == body.get("id")), None)
+                            if r is None:
+                                return self._send(404, {"error": "rule not found"})
+                            if act == "toggle":
+                                on = bool(body.get("enabled"))
+                                if on:
+                                    net_rule_apply(r)
+                                elif ADMIN:
+                                    net_rule_remove(r)
+                                else:
+                                    raise RuntimeError("Administrator rights are required to change this limit")
+                                r["enabled"] = on
+                            elif act == "delete":
+                                if ADMIN:
+                                    net_rule_remove(r)
+                                rules.remove(r)
+                        save_cfg()
+                    except (RuntimeError, ValueError, subprocess.SubprocessError) as e:
+                        return self._send(400, {"error": str(e)})
+                return self._send(200, {"netrules": rules})
             if path == "/api/net/label":
                 mac = str(body.get("mac", "")).lower()
                 if not re.fullmatch(r"[0-9a-f]{2}(-[0-9a-f]{2}){5}", mac):
@@ -1601,6 +1719,128 @@ def restart_into(fn):
     threading.Timer(0.5, quit_app).start()
 
 
+# ---------------------------------------------------------------- tray icon (notification area)
+LRESULT = ctypes.c_ssize_t
+WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+WM_TRAY, WM_COMMAND, WM_DESTROY = 0x0401, 0x0111, 0x0002
+NIM_ADD, NIM_MODIFY, NIM_DELETE = 0, 1, 2
+NIF_MESSAGE, NIF_ICON, NIF_TIP, NIF_INFO = 1, 2, 4, 0x10
+TRAY = {}
+
+
+class NOTIFYICONDATAW(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.DWORD), ("hWnd", wintypes.HWND), ("uID", wintypes.UINT), ("uFlags", wintypes.UINT),
+                ("uCallbackMessage", wintypes.UINT), ("hIcon", VP), ("szTip", wintypes.WCHAR * 128),
+                ("dwState", wintypes.DWORD), ("dwStateMask", wintypes.DWORD), ("szInfo", wintypes.WCHAR * 256),
+                ("uTimeout", wintypes.UINT), ("szInfoTitle", wintypes.WCHAR * 64), ("dwInfoFlags", wintypes.DWORD),
+                ("guidItem", ctypes.c_byte * 16), ("hBalloonIcon", VP)]
+
+
+class WNDCLASSW(ctypes.Structure):
+    _fields_ = [("style", wintypes.UINT), ("lpfnWndProc", WNDPROC), ("cbClsExtra", ctypes.c_int), ("cbWndExtra", ctypes.c_int),
+                ("hInstance", VP), ("hIcon", VP), ("hCursor", VP), ("hbrBackground", VP), ("lpszMenuName", wintypes.LPCWSTR),
+                ("lpszClassName", wintypes.LPCWSTR)]
+
+
+def _tray_icon_handle():
+    small = VP()
+    if FROZEN and shell32.ExtractIconExW(sys.executable, 0, None, ctypes.byref(small), 1) > 0 and small:
+        return small
+    ico = os.path.join(HERE, "assets", "ramcapper.ico")
+    h = user32.LoadImageW(None, ico, 1, 16, 16, 0x10) if os.path.exists(ico) else None
+    return h or user32.LoadIconW(None, ctypes.c_void_p(32512))
+
+
+def tray_balloon(title, msg):
+    nid = TRAY.get("nid")
+    if nid is None:
+        return
+    nid.uFlags = NIF_INFO
+    nid.szInfoTitle, nid.szInfo, nid.dwInfoFlags = title[:63], msg[:255], 1
+    shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(nid))
+
+
+def tray_remove():
+    nid = TRAY.get("nid")
+    if nid is not None:
+        shell32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(nid))
+
+
+def _tray_thread(first_balloon):
+    user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    user32.DefWindowProcW.restype = LRESULT
+    user32.CreateWindowExW.restype = wintypes.HWND
+    user32.CreateWindowExW.argtypes = [wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_int, ctypes.c_int,
+                                       ctypes.c_int, ctypes.c_int, wintypes.HWND, VP, VP, VP]
+    user32.LoadImageW.restype = VP
+    user32.LoadImageW.argtypes = [VP, wintypes.LPCWSTR, wintypes.UINT, ctypes.c_int, ctypes.c_int, wintypes.UINT]
+    user32.LoadIconW.restype = VP
+    user32.LoadIconW.argtypes = [VP, VP]
+    user32.CreatePopupMenu.restype = VP
+    user32.AppendMenuW.argtypes = [VP, wintypes.UINT, VP, wintypes.LPCWSTR]
+    user32.TrackPopupMenu.argtypes = [VP, wintypes.UINT, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.HWND, VP]
+    user32.DestroyMenu.argtypes = [VP]
+    user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+    user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    shell32.Shell_NotifyIconW.argtypes = [wintypes.DWORD, VP]
+    taskbar_created = user32.RegisterWindowMessageW("TaskbarCreated")
+
+    def wndproc(hwnd, msg, wparam, lparam):
+        if msg == WM_TRAY:
+            ev = lparam & 0xFFFF
+            if ev in (0x0202, 0x0203):                       # left click / double click -> open the dashboard
+                open_window()
+            elif ev in (0x0205, 0x007B):                     # right click -> menu
+                pt = wintypes.POINT()
+                user32.GetCursorPos(ctypes.byref(pt))
+                menu = user32.CreatePopupMenu()
+                user32.AppendMenuW(menu, 0, 1, "Open RamCapper")
+                user32.AppendMenuW(menu, 0x800, 0, None)    # separator
+                user32.AppendMenuW(menu, 0, 2, "Quit RamCapper")
+                user32.SetForegroundWindow(hwnd)
+                user32.TrackPopupMenu(menu, 0x0002, pt.x, pt.y, 0, hwnd, None)   # TPM_RIGHTBUTTON; the choice arrives as WM_COMMAND
+                user32.PostMessageW(hwnd, 0, 0, 0)
+                user32.DestroyMenu(menu)
+            return 0
+        if msg == WM_COMMAND:
+            cmd = wparam & 0xFFFF
+            if cmd == 1:
+                open_window()
+            elif cmd == 2:
+                threading.Thread(target=quit_app, daemon=True).start()
+            return 0
+        if msg == taskbar_created:                           # Explorer restarted: put the icon back
+            shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(TRAY["nid"]))
+            return 0
+        return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+    TRAY["proc"] = WNDPROC(wndproc)                          # keep a reference or it gets garbage-collected
+    wc = WNDCLASSW()
+    wc.lpfnWndProc, wc.lpszClassName = TRAY["proc"], "RamCapperTray"
+    wc.hInstance = k32.GetModuleHandleW(None)
+    user32.RegisterClassW(ctypes.byref(wc))
+    hwnd = user32.CreateWindowExW(0, "RamCapperTray", "RamCapper", 0, 0, 0, 0, 0, None, None, wc.hInstance, None)
+    nid = NOTIFYICONDATAW()
+    nid.cbSize, nid.hWnd, nid.uID = ctypes.sizeof(nid), hwnd, 1
+    nid.uFlags, nid.uCallbackMessage, nid.hIcon = NIF_MESSAGE | NIF_ICON | NIF_TIP, WM_TRAY, _tray_icon_handle()
+    nid.szTip = "RamCapper - running (click to open)"
+    TRAY["nid"] = nid
+    if not shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid)):
+        print("tray icon could not be added", file=sys.stderr)
+    if first_balloon:
+        tray_balloon("RamCapper is running", "It keeps working in the background. Use this tray icon to open it or quit.")
+    msg = wintypes.MSG()
+    while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+        user32.TranslateMessage(ctypes.byref(msg))
+        user32.DispatchMessageW(ctypes.byref(msg))
+
+
+def start_tray(first_balloon):
+    k32.GetModuleHandleW.restype = VP
+    k32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+    threading.Thread(target=_tray_thread, args=(first_balloon,), daemon=True).start()
+
+
 def main():
     no_open = "--no-open" in sys.argv
     takeover = "--takeover" in sys.argv
@@ -1623,6 +1863,10 @@ def main():
     SERVER["srv"] = srv
     atexit.register(release_caps)
     threading.Thread(target=sampler, daemon=True).start()
+    if ADMIN:
+        threading.Thread(target=reapply_net_rules, daemon=True).start()
+    if "--no-tray" not in sys.argv:
+        start_tray(first_balloon=not no_open and not takeover)
     if not no_open:
         threading.Timer(1.0, open_window).start()
     print(f"RamCapper running on http://127.0.0.1:{PORT}  (admin={ADMIN})")

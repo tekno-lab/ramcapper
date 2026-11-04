@@ -24,6 +24,8 @@
   | **Terminate** | Ends the app after it stays over its limit for N checks (2 s each). |
 - **Emergency auto-trim** – trims every reachable process when system RAM crosses a threshold you choose.
 - **Network tab** *(opt-in)* – live connections per app, throughput chart, and a scan of devices on your local subnet with new-device alerts. Devices are identified by hostname (NetBIOS, mDNS, router DNS), UPnP description, a MAC-vendor database and a light port fingerprint (router, printer, Chromecast, IoT…). Click ✎ to give any device your own name.
+- **Network limits & kill** – per-app **Throttle upload** (Windows QoS) or **Block internet** (Windows Firewall rule), plus Kill for an app or a single connection's process. Limits need administrator rights; download speed can't be limited natively by Windows.
+- **Tray icon** – RamCapper keeps running when you close its window; the notification-area icon opens the dashboard (click) or quits (right-click). Start with `--no-tray` to disable it.
 - **Storage tab** *(opt-in)* – scan a drive or folder to see what takes the most space: drill-down folders, largest files, breakdown by file type. Read-only.
 - **Portable** – single `.exe`, no installer. History and settings live in a folder you choose.
 - **Safe by design** – clipboard owners are never trimmed, critical Windows processes can't be ended, and the web UI only listens on `127.0.0.1`.
@@ -95,6 +97,7 @@ python tools/make_icon.py
 | `RamCapper.exe --admin` | Relaunch elevated (UAC prompt). Needed to trim, cap or end elevated/system processes. |
 | `RamCapper.exe --data "E:\RamCapperData"` | Use a specific data folder. |
 | `RamCapper.exe --no-open` | Run in the background without opening a window. |
+| `RamCapper.exe --no-tray` | Don't show the notification-area icon. |
 
 You can also restart as administrator and move the data folder from the **Settings** tab.
 

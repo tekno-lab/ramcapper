@@ -234,9 +234,24 @@ tr.clk{cursor:pointer}
         <table style="margin-top:8px"><thead><tr><th>Device</th><th>IP</th><th>MAC</th><th>Status</th><th>First seen</th></tr></thead><tbody id="devices"></tbody></table>
       </div>
       <div class="card" style="margin-top:16px">
+        <h3>Apps using the network</h3><div class="sub">Established connections per app. Click an app to filter the connection list below.</div>
+        <table style="margin-top:8px"><thead><tr><th>App</th><th class="r">Connections</th><th class="r">Remote hosts</th><th>Limit</th><th class="r">Actions</th></tr></thead><tbody id="net-apps"></tbody></table>
+      </div>
+      <div class="card" style="margin-top:16px">
+        <h3>Network limits</h3>
+        <div class="sub"><b>Throttle</b> caps an app's <i>upload</i> speed (Windows QoS; re-applied by RamCapper each start). <b>Block</b> cuts its internet access with a firewall rule that stays until you remove it here. Windows can't limit download speed natively. Both need administrator rights.</div>
+        <div class="banner hide" id="nl-admin" style="margin:10px 0 0">Administrator rights are needed to create network limits. <a href="#" id="nl-elev">Restart as administrator</a></div>
+        <table style="margin-top:8px"><thead><tr><th style="width:130px">Enforced</th><th>App</th><th>Mode</th><th>Rate</th><th>Status</th><th class="r"></th></tr></thead><tbody id="netrules"></tbody></table>
+        <div class="form" style="grid-template-columns:1.4fr .9fr 1fr auto">
+          <div><label>App (executable)</label><input type="text" id="nl-name" list="nl-apps" placeholder="e.g. chrome.exe" autocomplete="off"><datalist id="nl-apps"></datalist></div>
+          <div><label>Mode</label><select id="nl-mode"><option value="throttle">Throttle upload</option><option value="block">Block internet</option></select></div>
+          <div id="nl-rate"><label>Upload limit</label><div class="row" style="gap:6px"><input type="number" id="nl-val" min="1" value="1" step="any"><select id="nl-unit" style="width:84px"><option>Mbps</option><option>Kbps</option></select></div></div>
+          <button class="btn primary" id="nl-add">Add limit</button>
+        </div>
+      </div>
+      <div class="card" style="margin-top:16px">
         <div class="toolbar"><h3 style="margin:0">Connections</h3><input type="text" class="search" id="conn-filter" placeholder="Filter by app, IP, host, port…"><label class="row sub" style="gap:6px"><input type="checkbox" id="conn-listen"> show listening ports</label></div>
-        <div class="legend" id="conn-apps" style="margin:0 0 10px"></div>
-        <table><thead><tr><th>App</th><th>Proto</th><th>Local</th><th>Remote</th><th>State</th></tr></thead><tbody id="conns"></tbody></table>
+        <table><thead><tr><th>App</th><th>Proto</th><th>Local</th><th>Remote</th><th>State</th><th class="r"></th></tr></thead><tbody id="conns"></tbody></table>
       </div>
     </div>
   </section>
@@ -588,7 +603,7 @@ async function relocate(body,ask){
 $('#i-move').onclick=()=>{const p=$('#i-new').value.trim();if(!p){toast('Enter a folder path first');return}relocate({path:p},`Move RamCapper's data to:\n${p}\n\nRamCapper will restart.`)};
 $('#i-reset').onclick=()=>relocate({reset:true},'Use the default data folder (next to the program)? RamCapper will restart.');
 
-$('#btn-close').onclick=()=>{window.close();setTimeout(()=>toast('This browser tab can’t be closed by the page — close it yourself. (RamCapper keeps running.)'),400)};
+$('#btn-close').onclick=async()=>{try{await api('/api/closing',{})}catch(e){}window.close();setTimeout(()=>toast('This browser tab can’t be closed by the page — close it yourself. (RamCapper keeps running.)'),400)};
 $('#btn-quit').onclick=async()=>{
   if(!confirm('Quit RamCapper completely?\n\nMonitoring, history recording and all limits will stop until you start it again.'))return;
   try{await api('/api/quit',{})}catch(e){}
@@ -656,16 +671,62 @@ function renderConns(){
   const d=S.net;if(!d)return;
   const q=$('#conn-filter').value.trim().toLowerCase(),listen=$('#conn-listen').checked;
   let list=d.conns.filter(c=>listen||c.st!=='LISTEN');
-  const byApp={};list.forEach(c=>byApp[c.proc]=(byApp[c.proc]||0)+1);
   if(q)list=list.filter(c=>(c.proc+' '+c.l+':'+c.lp+' '+c.r+':'+c.rp+' '+c.host+' '+c.st).toLowerCase().includes(q));
   list.sort((a,b)=>a.proc.localeCompare(b.proc)||(a.st==='ESTABLISHED'?-1:1));
-  $('#conn-apps').innerHTML=Object.entries(byApp).sort((a,b)=>b[1]-a[1]).slice(0,12).map(([n,c])=>`<span class="lg" data-cf="${esc(n)}"><i class="dot" style="background:${colorOf(n)}"></i>${esc(n)} <em>${c}</em></span>`).join('');
-  $('#conns').innerHTML=list.slice(0,400).map(c=>`<tr><td><span class="name"><i class="dot" style="background:${colorOf(c.proc)}"></i>${esc(c.proc)}</span></td><td class="sub">${c.proto}</td>
+  $('#conns').innerHTML=list.slice(0,400).map(c=>`<tr><td><span class="name">${icon(c.proc)}${esc(c.proc)}</span></td><td class="sub">${c.proto}</td>
     <td>${esc(c.l)}:${c.lp}</td><td>${c.r?esc(c.r)+':'+c.rp+(c.host?` <span class="sub">${esc(c.host)}</span>`:'')+(c.scope==='lan'?'<span class="badge">LAN</span>':''):'<span class="sub">—</span>'}</td>
-    <td class="sub">${esc(c.st||'')}</td></tr>`).join('')||'<tr><td colspan="5" class="sub">No connections</td></tr>';
+    <td class="sub">${esc(c.st||'')}</td><td class="r">${c.pid>4&&!isProtected(c.proc)?`<button class="btn sm danger" data-cpid="${c.pid}" data-cname="${esc(c.proc)}" title="End process ${c.pid} (${esc(c.proc)})">End</button>`:''}</td></tr>`).join('')||'<tr><td colspan="6" class="sub">No connections</td></tr>';
+  renderNetApps();renderNetRules();
 }
+const PROTECTED_UI=new Set(['system','registry','smss.exe','csrss.exe','wininit.exe','services.exe','lsass.exe','winlogon.exe','svchost.exe','dwm.exe','explorer.exe','fontdrvhost.exe','memory compression','system idle process','secure system','ramcapper.exe']);
+const isProtected=n=>PROTECTED_UI.has((n||'').toLowerCase());
+function netRulesFor(n){return ((S.net&&S.net.netrules)||[]).filter(r=>r.name===n)}
+function renderNetApps(){
+  const d=S.net;if(!d)return;
+  const by={};
+  d.conns.forEach(c=>{if(c.st!=='ESTABLISHED'&&c.proto!=='UDP')return;if(c.proto==='UDP'&&!c.r)return;
+    const a=by[c.proc]||(by[c.proc]={n:c.proc,c:0,hosts:new Set()});a.c++;if(c.r)a.hosts.add(c.r)});
+  const list=Object.values(by).sort((a,b)=>b.c-a.c).slice(0,30);
+  $('#net-apps').innerHTML=list.map(a=>`<tr><td><div class="name" data-cf="${esc(a.n)}">${icon(a.n)}<b>${esc(a.n)}</b></div></td><td class="r">${a.c}</td><td class="r">${a.hosts.size}</td>
+    <td>${netRulesFor(a.n).map(r=>`<span class="pill ${r.enabled?'':'off'}">${r.mode==='block'?'blocked':'↑ '+fmtRate(r.kbps)}</span>`).join(' ')}</td>
+    <td class="r">${isProtected(a.n)?'':`<button class="btn sm" data-nlimit="${esc(a.n)}">Limit</button> <button class="btn sm" data-nblock="${esc(a.n)}">Block</button> <button class="btn sm danger" data-nkill="${esc(a.n)}">Kill</button>`}</td></tr>`).join('')||'<tr><td colspan="5" class="sub">No active connections</td></tr>';
+  $('#nl-apps').innerHTML=list.map(a=>`<option value="${esc(a.n)}">`).join('');
+}
+const fmtRate=k=>k>=1000?(k/1000).toFixed(k%1000?1:0)+' Mbps':k+' Kbps';
+function renderNetRules(){
+  const d=S.net;if(!d)return;
+  $('#nl-admin').classList.toggle('hide',d.admin);
+  $('#netrules').innerHTML=d.netrules.map(r=>`<tr><td><div class="row" style="gap:8px"><label class="sw"><input type="checkbox" data-nrt="${r.id}" ${r.enabled?'checked':''}><s></s></label><span class="${r.enabled?'':'sub'}">${r.enabled?'Active':'Paused'}</span></div></td>
+    <td><span class="name">${icon(r.name)}<b>${esc(r.name)}</b></span></td><td>${r.mode==='block'?'Block internet':'Throttle upload'}</td><td>${r.mode==='block'?'<span class="sub">—</span>':fmtRate(r.kbps)}</td>
+    <td class="${r.status?'up':'sub'}">${esc(r.status||(r.enabled?'applied':''))}</td><td class="r"><button class="btn sm danger" data-nrd="${r.id}">Delete</button></td></tr>`).join('')||'<tr><td colspan="6" class="sub">No network limits yet.</td></tr>';
+}
+async function addNetRule(rule){
+  try{const r=await api('/api/netrule',{action:'add',rule});toast('Network limit applied');if(S.net)S.net.netrules=r.netrules;renderNetRules();pollNet()}catch(e){toast(e.message)}
+}
+$('#nl-mode').onchange=e=>$('#nl-rate').classList.toggle('hide',e.target.value==='block');
+$('#nl-add').onclick=()=>{
+  const name=$('#nl-name').value.trim().toLowerCase(),mode=$('#nl-mode').value;let v=parseFloat($('#nl-val').value);
+  if(!name){toast('Choose an app');return}
+  if(mode==='throttle'&&!(v>0)){toast('Enter a rate');return}
+  const kbps=mode==='block'?0:Math.round(v*($('#nl-unit').value==='Mbps'?1000:1));
+  addNetRule({name,mode,kbps:kbps||8});$('#nl-name').value='';
+};
+$('#nl-elev').onclick=e=>{e.preventDefault();elevate()};
+document.body.addEventListener('click',async e=>{
+  const t=e.target.closest('[data-nlimit],[data-nblock],[data-nkill],[data-cpid],[data-nrd],[data-cf]');if(!t)return;const d=t.dataset;
+  if(d.cf!==undefined){$('#conn-filter').value=d.cf;renderConns();return}
+  if(d.nlimit){$('#nl-name').value=d.nlimit;$('#nl-mode').value='throttle';$('#nl-rate').classList.remove('hide');$('#nl-val').focus();$('#nl-name').scrollIntoView({block:'center',behavior:'smooth'})}
+  else if(d.nblock){if(confirm(`Block ${d.nblock} from the internet?\n\nA Windows Firewall rule will be created (outbound). It stays active until you delete it here. Needs administrator rights.`))addNetRule({name:d.nblock,mode:'block',kbps:0})}
+  else if(d.nkill){if(confirm(`Kill ${d.nkill}?\n\nThis ends all its processes immediately. Unsaved work will be lost.`)){try{const r=await api('/api/kill',{name:d.nkill});toast(`${d.nkill}: ended ${r.killed} process(es)`)}catch(x){toast(x.message)}pollNet()}}
+  else if(d.cpid){if(confirm(`End process ${d.cpid} (${d.cname})?\n\nUnsaved work in it will be lost.`)){try{await api('/api/kill',{pid:+d.cpid});toast('Process ended')}catch(x){toast(x.message)}pollNet()}}
+  else if(d.nrd){try{const r=await api('/api/netrule',{action:'delete',id:d.nrd});S.net.netrules=r.netrules;renderNetRules()}catch(x){toast(x.message)}pollNet()}
+});
+document.body.addEventListener('change',async e=>{
+  const id=e.target.dataset.nrt;if(!id)return;
+  try{const r=await api('/api/netrule',{action:'toggle',id,enabled:e.target.checked});S.net.netrules=r.netrules}catch(x){toast(x.message);e.target.checked=!e.target.checked}
+  pollNet();
+});
 $('#conn-filter').oninput=renderConns;$('#conn-listen').onchange=renderConns;
-$('#conn-apps').onclick=e=>{const n=e.target.closest('.lg')?.dataset.cf;if(n){$('#conn-filter').value=n;renderConns()}};
 $('#devices').onclick=async e=>{
   const a=e.target.closest('[data-ren]');if(!a)return;e.preventDefault();
   const v=prompt('Name for this device (leave empty to clear):',a.dataset.cur);if(v===null)return;
