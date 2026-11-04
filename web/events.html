@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RamCapper</title>
+<link rel="icon" type="image/png" href="/logo.png">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body data-page="events" data-title="Events">
+<script src="/app.js"></script>
+<main class="main">
+  <header class="phead">
+    <div class="grow"><h1>Events</h1><p>Limiter actions and manual operations, kept for 3 days.</p></div>
+    <div class="pact"><select id="kind"><option value="">All events</option></select></div>
+  </header>
+  <section class="card"><div id="events"></div></section>
+</main>
+<script>
+let LIST=[];
+function render(){
+  const k=$('#kind').value,list=LIST.filter(e=>!k||e.kind===k);
+  $('#events').innerHTML=list.map(e=>`<div class="ev"><span class="k ${esc(e.kind)}">${esc(e.kind)}</span><span class="t">${fmtT(e.ts,true)}</span><div><b>${esc(e.app)}</b> — ${esc(e.detail)}</div></div>`).join('')||'<div class="sub" style="padding:14px 4px">Nothing yet.</div>';
+}
+window.onEvents=ev=>{
+  LIST=ev;const cur=$('#kind').value,kinds=[...new Set(ev.map(e=>e.kind))].sort();
+  $('#kind').innerHTML='<option value="">All events</option>'+kinds.map(x=>`<option ${x===cur?'selected':''}>${esc(x)}</option>`).join('');
+  render();
+};
+$('#kind').onchange=render;
+boot();
+</script>
+</body>
+</html>

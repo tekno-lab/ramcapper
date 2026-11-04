@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RamCapper</title>
+<link rel="icon" type="image/png" href="/logo.png">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body data-page="index" data-title="Memory">
+<script src="/app.js"></script>
+<main class="main">
+  <header class="phead">
+    <div class="grow"><h1>Memory</h1><p>What is using your RAM right now, and what used it over time.</p></div>
+    <div class="pact">
+      <div class="seg" id="range"></div>
+      <button class="btn primary" id="optimize" title="Ask Windows to reclaim idle memory from every process it can reach (clipboard owners are skipped)">⚡ Optimize now</button>
+    </div>
+  </header>
+
+  <div class="top">
+    <div class="card">
+      <h3>System memory</h3><div class="sub" id="totaltxt">&nbsp;</div>
+      <div class="gauge">
+        <svg width="176" height="176" viewBox="0 0 170 170">
+          <circle cx="85" cy="85" r="72" fill="none" stroke="var(--panel3)" stroke-width="13"/>
+          <circle id="ring" cx="85" cy="85" r="72" fill="none" stroke="var(--ok)" stroke-width="13" stroke-linecap="round" stroke-dasharray="0 999" style="transition:stroke-dasharray .6s,stroke .3s"/>
+        </svg>
+        <div class="mid"><div class="pct" id="pct">–</div><div class="sub">in use</div></div>
+      </div>
+      <div class="stats">
+        <div class="stat"><span>Used</span><b id="s-used">–</b></div>
+        <div class="stat"><span>Available</span><b id="s-avail">–</b></div>
+        <div class="stat"><span>Commit</span><b id="s-commit">–</b></div>
+        <div class="stat"><span>Processes</span><b id="s-procs">–</b></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>What used RAM, and when</h3><div class="sub">Top apps stacked over time · hover for exact values · ▲ marks limiter events</div>
+      <div class="chartbox"><canvas id="chart"></canvas><div class="tip" id="tip"></div></div>
+      <div class="legend" id="legend"></div>
+    </div>
+  </div>
+
+  <section class="card">
+    <div class="toolbar"><h3 style="margin:0">Apps</h3><input type="text" class="search" id="search" placeholder="Filter apps…"><span class="sub">Memory = working set (like Task Manager's "Memory" column, incl. shared pages). Grouped by executable.</span></div>
+    <table><thead><tr><th>App</th><th style="width:200px">Memory</th><th class="r">Δ 5 min</th><th>Trend</th><th>Limit</th><th class="r">Actions</th></tr></thead><tbody id="apps"></tbody></table>
+  </section>
+</main>
+
+<aside class="drawer" id="drawer">
+  <div class="row"><h2 id="d-name" class="grow"></h2><button class="btn sm" id="d-close">Close ✕</button></div>
+  <div class="sub" id="d-sub"></div>
+  <div class="chartbox" style="height:210px"><canvas id="dchart"></canvas><div class="tip" id="dtip"></div></div>
+  <div class="row" style="margin:14px 0"><button class="btn sm" id="d-trim">Trim this app</button><button class="btn sm danger" id="d-kill">End all processes</button></div>
+  <table><thead><tr><th>PID</th><th class="r">Working set</th><th class="r">Private</th><th></th></tr></thead><tbody id="d-procs"></tbody></table>
+</aside>
+
+<script>
+S.open=null;S.dhist=null;
+function ruleFor(name){return (S.now.rules||[]).filter(r=>r.name===name)}
+function renderChart(){
+  const cv=$('#chart');if(!S.hist)return;
+  const g=S.cfg&&S.cfg.global;
+  cv._redraw=()=>drawChart(cv,S.hist,{yMax:S.hist.total||undefined,threshold:g&&g.enabled?S.hist.total*g.threshold/100:0});
+  cv._redraw();
+  const last=S.hist.t.length-1;
+  $('#legend').innerHTML=S.hist.series.slice().reverse().map(s=>`<span class="lg ${S.hidden.has(s.name)?'off':''}" data-n="${esc(s.name)}"><i class="dot" style="background:${colorOf(s.name)}"></i>${esc(s.name)} <em>${last>=0?fmtB(s.v[last]):''}</em></span>`).join('');
+}
+function renderGauge(s){
+  const p=s.percent,c=2*Math.PI*72,ring=$('#ring');
+  ring.setAttribute('stroke-dasharray',`${c*p/100} ${c}`);
+  ring.setAttribute('stroke',p>=85?'var(--bad)':p>=70?'var(--warn)':'var(--ok)');
+  $('#pct').textContent=Math.round(p)+'%';
+  $('#totaltxt').textContent=fmtB(s.total)+' installed';
+  $('#s-used').textContent=fmtB(s.used);$('#s-avail').textContent=fmtB(s.avail);
+  $('#s-commit').textContent=fmtB(s.commit_used)+' / '+fmtB(s.commit_limit);
+}
+function renderApps(){
+  const n=S.now;if(!n)return;
+  $('#s-procs').textContent=n.apps.reduce((a,x)=>a+x.procs,0)+'+';
+  const q=$('#search').value.trim().toLowerCase();
+  const list=n.apps.filter(a=>!q||a.name.includes(q));
+  const max=Math.max(1,...n.apps.map(a=>a.rss));
+  $('#apps').innerHTML=list.map(a=>{
+    const c=colorOf(a.name),d=a.d5,cls=d>20*MB?'up':d<-20*MB?'down':'flat';
+    const sp=a.spark,mx=Math.max(1,...sp),mn=Math.min(...sp);
+    const pts=sp.map((v,i)=>`${(i/(Math.max(1,sp.length-1))*84).toFixed(1)},${(22-(v-mn)/Math.max(1,mx-mn)*20).toFixed(1)}`).join(' ');
+    const pills=ruleFor(a.name).map(r=>`<a class="pill ${r.enabled?'':'off'}" href="/limiter.html" title="Edit in Limiter">${r.limit_mb>=1024?(r.limit_mb/1024).toFixed(r.limit_mb%1024?1:0)+' GB':r.limit_mb+' MB'} · ${ACTL[r.action]}</a>`).join(' ');
+    return `<tr><td><div class="name" data-open="${esc(a.name)}"><i class="dot" style="background:${c}"></i>${icon(a.name)}<b>${esc(a.name)}</b><span class="sub">${a.procs>1?a.procs+' procs':''}</span></div></td>
+      <td>${fmtB(a.rss)}<div class="bar"><i style="width:${a.rss/max*100}%;background:${c}"></i></div></td>
+      <td class="r ${cls}">${fmtD(d)}</td>
+      <td><svg width="84" height="24"><polyline points="${pts}" fill="none" stroke="${c}" stroke-width="1.6" stroke-linejoin="round"/></svg></td>
+      <td>${pills}</td>
+      <td class="r"><button class="btn sm" data-trim="${esc(a.name)}">Trim</button> <button class="btn sm" data-limit="${esc(a.name)}">Limit</button>${a.protected?'':` <button class="btn sm danger" data-kill="${esc(a.name)}" data-procs="${a.procs}" title="End all ${a.procs} process(es) of ${esc(a.name)}">Kill</button>`}</td></tr>`}).join('')||'<tr><td colspan="6" class="sub">No matching apps</td></tr>';
+}
+function renderDrawer(det){
+  const a=S.now&&S.now.apps.find(x=>x.name===S.open);
+  $('#d-name').textContent=S.open;
+  $('#d-sub').textContent=a?`${fmtB(a.rss)} working set · ${fmtB(a.private)} private · ${a.procs} process${a.procs>1?'es':''}`:'not running';
+  if(det){
+    $('#d-procs').innerHTML=det.procs.map(p=>`<tr><td>${p.pid}${p.capped?' <span class="pill">capped</span>':''}<div class="cmd" title="${esc(p.cmd)}">${esc(p.cmd)}</div></td><td class="r">${fmtB(p.rss)}</td><td class="r">${fmtB(p.private)}</td>
+      <td class="r"><button class="btn sm" data-tp="${p.pid}">Trim</button> ${det.protected?'':`<button class="btn sm danger" data-kp="${p.pid}">End</button>`}</td></tr>`).join('');
+    $('#d-kill').classList.toggle('hide',det.protected);
+  }
+  if(S.dhist){const cv=$('#dchart');cv._redraw=()=>drawChart(cv,S.dhist,{});cv._redraw()}
+}
+window.onNow=async()=>{
+  renderGauge(S.now.sys);renderApps();
+  if(S.open){const det=await api('/api/app?name='+encodeURIComponent(S.open));renderDrawer(det)}
+};
+window.onCfg=renderChart;
+async function loadHist(){
+  try{S.hist=await api('/api/history?range='+S.range);renderChart();
+    if(S.open){S.dhist=await api('/api/history?range='+S.range+'&name='+encodeURIComponent(S.open));renderDrawer()}}catch(e){}
+}
+$('#range').innerHTML=['5m','15m','1h','6h','24h','3d'].map(r=>`<button data-r="${r}" class="${r===S.range?'on':''}">${r}</button>`).join('');
+$('#range').onclick=e=>{const r=e.target.dataset.r;if(!r)return;S.range=r;$$('#range button').forEach(b=>b.classList.toggle('on',b.dataset.r===r));loadHist()};
+$('#legend').onclick=e=>{const n=e.target.closest('.lg')?.dataset.n;if(!n)return;S.hidden.has(n)?S.hidden.delete(n):S.hidden.add(n);renderChart()};
+$('#search').oninput=renderApps;
+$('#optimize').onclick=async()=>{const b=$('#optimize');b.disabled=true;try{const r=await api('/api/trim',{});toast(`Trimmed ${r.ok} processes · freed ~${fmtB(r.freed)}${r.failed?` · ${r.failed} not accessible`:''}`)}catch(e){toast('Failed: '+e.message)}b.disabled=false;loadNow()};
+document.body.addEventListener('click',async e=>{
+  const t=e.target.closest('[data-open],[data-trim],[data-limit],[data-tp],[data-kp],[data-kill]');if(!t)return;
+  const d=t.dataset;
+  if(d.kill!==undefined){
+    if(!confirm(`Kill ${d.kill}?\n\nThis ends all ${d.procs} process(es) of this app immediately. Unsaved work in it will be lost.`))return;
+    try{const r=await api('/api/kill',{name:d.kill});toast(`${d.kill}: ended ${r.killed} process(es)`)}catch(x){toast('Could not kill: '+x.message)}
+    loadNow();return}
+  if(d.open){S.open=d.open;S.dhist=null;$('#drawer').classList.add('open');renderDrawer();loadNow();loadHist()}
+  else if(d.trim!==undefined){const r=await api('/api/trim',{name:d.trim});toast(`${d.trim}: freed ~${fmtB(r.freed)}${r.failed?` (${r.failed} not accessible)`:''}`);loadNow()}
+  else if(d.limit!==undefined){location.href='/limiter.html?app='+encodeURIComponent(d.limit)}
+  else if(d.tp){const r=await api('/api/trim',{pid:+d.tp});toast(r.ok?'Trimmed':'Not accessible');loadNow()}
+  else if(d.kp){if(confirm('End process '+d.kp+'? Unsaved work in it will be lost.')){await api('/api/kill',{pid:+d.kp});loadNow()}}
+});
+$('#d-close').onclick=()=>{S.open=null;$('#drawer').classList.remove('open')};
+$('#d-trim').onclick=async()=>{const r=await api('/api/trim',{name:S.open});toast(`Freed ~${fmtB(r.freed)}`);loadNow()};
+$('#d-kill').onclick=async()=>{if(confirm(`End ALL ${S.open} processes? Unsaved work will be lost.`)){const r=await api('/api/kill',{name:S.open});toast(`Ended ${r.killed} process(es)`);loadNow()}};
+bindHover($('#chart'),$('#tip'),()=>S.hist);
+bindHover($('#dchart'),$('#dtip'),()=>S.dhist);
+window.addEventListener('resize',()=>{renderChart();renderDrawer()});
+boot();loadHist();setInterval(loadHist,6000);
+</script>
+</body>
+</html>

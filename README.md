@@ -27,6 +27,8 @@
 - **Network limits & kill** – per-app **Throttle upload** (Windows QoS) or **Block internet** (Windows Firewall rule), plus Kill for an app or a single connection's process. Limits need administrator rights; download speed can't be limited natively by Windows.
 - **Tray icon** – RamCapper keeps running when you close its window; the notification-area icon opens the dashboard (click) or quits (right-click). Start with `--no-tray` to disable it.
 - **Storage tab** *(opt-in)* – scan a drive or folder to see what takes the most space: drill-down folders, largest files, breakdown by file type. Read-only.
+- **One page per tab** – a sidebar layout with separate pages for Memory, Limiter, Network, Storage, Events and Settings.
+- **Single instance** – starting RamCapper again (or clicking the tray icon) just focuses the open window; a newer version automatically replaces an older one that is still running. (Task Manager shows two `RamCapper.exe` entries for the one-file build – that is PyInstaller's launcher plus the app, not two copies.)
 - **Portable** – single `.exe`, no installer. History and settings live in a folder you choose.
 - **Safe by design** – clipboard owners are never trimmed, critical Windows processes can't be ended, and the web UI only listens on `127.0.0.1`.
 
@@ -49,7 +51,7 @@ python ramcapper.py
 
 ## How to compile
 
-The portable executable is built with [PyInstaller](https://pyinstaller.org). The dashboard (`index.html`) and icon are bundled into the single file.
+The portable executable is built with [PyInstaller](https://pyinstaller.org). The dashboard (`web/`) and icon are bundled into the single file.
 
 **Prerequisites:** Windows 10/11 · Python 3.9+ on `PATH` · internet access for `pip`.
 
@@ -67,16 +69,16 @@ This installs the dependencies and runs PyInstaller. The result is **`dist\RamCa
 pip install -r requirements.txt pyinstaller
 python -m PyInstaller --noconfirm --clean --onefile --noconsole ^
     --icon assets\ramcapper.ico --name RamCapper ^
-    --add-data "index.html;." --add-data "assets\oui.json.gz;assets" ramcapper.py
+    --add-data "web;web" --add-data "assets\oui.json.gz;assets" ramcapper.py
 ```
 
-Flag notes: `--onefile` produces the portable exe, `--noconsole` hides the console window, `--add-data` bundles the UI and the MAC-vendor database next to the code (Windows uses `;` as the separator).
+Flag notes: `--onefile` produces the portable exe, `--noconsole` hides the console window, `--add-data` bundles the UI (`web/`) and the MAC-vendor database next to the code (Windows uses `;` as the separator).
 
 ### Troubleshooting the build
 
 | Problem | Fix |
 |---|---|
-| `Unable to find ... index.html when adding binary and data files` | Run the command from the repository root (the folder containing `index.html`). |
+| `Unable to find ... index.html when adding binary and data files` | Run the command from the repository root (the folder containing `web/`). |
 | `ValueError: path is on mount 'D:', start on mount 'C:'` | Don't point `--workpath` / `--specpath` at a different drive than the project. The defaults are fine. |
 | Antivirus quarantines `dist\RamCapper.exe` | Common false positive for PyInstaller one-file apps. Add an exclusion or run from source. |
 | Replacing a running exe fails | Press **Quit** in RamCapper (or run `kill.bat`) first. |
@@ -132,7 +134,7 @@ You can also restart as administrator and move the data folder from the **Settin
 
 ```
 ramcapper.py      backend: sampler, limiter, network/storage modules, HTTP server
-index.html        dashboard (single file, no external dependencies)
+web/              dashboard: one page per tab (index, limiter, network, storage, events, settings) + shared app.css / app.js
 assets/           icon source (SVG), .ico and .png, MAC-vendor database (oui.json.gz)
 tools/            helper scripts (icon generation, make_oui.py to refresh the vendor database from the IEEE registry)
 build.bat         one-command PyInstaller build

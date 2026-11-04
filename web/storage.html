@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RamCapper</title>
+<link rel="icon" type="image/png" href="/logo.png">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body data-page="storage" data-title="Storage">
+<script src="/app.js"></script>
+<main class="main">
+  <header class="phead">
+    <div class="grow"><h1>Storage</h1><p>Scan a drive or folder to see what takes the most space. Read-only — nothing is ever deleted.</p></div>
+    <div class="pact"><span class="sub" id="m-lbl">Off</span><label class="sw"><input type="checkbox" data-mod="storage"><s></s></label></div>
+  </header>
+
+  <div class="card empty" id="off">Turn the switch on to enable disk scanning. Scanning reads file sizes only and runs when you press Scan.</div>
+  <div id="on" class="hide">
+    <div class="drives" id="drives"></div>
+    <div class="card">
+      <div class="toolbar" style="margin:0">
+        <select id="st-drive"></select>
+        <input type="text" id="st-path" class="search" style="width:360px" placeholder="…or type a folder, e.g. C:\Users\you\Downloads">
+        <button class="btn primary" id="st-scan">Scan</button><button class="btn hide" id="st-cancel">Cancel</button>
+      </div>
+      <div class="sub" id="st-prog" style="margin-top:10px"></div>
+    </div>
+    <div id="st-result" class="hide">
+      <div class="card">
+        <div class="sub" id="st-crumb" style="margin-bottom:10px"></div>
+        <table><thead><tr><th>Name</th><th style="width:300px">Size</th><th class="r">Files</th><th class="r"></th></tr></thead><tbody id="st-rows"></tbody></table>
+      </div>
+      <div class="grid2" style="margin-top:16px">
+        <div class="card"><h3>Largest files</h3><div class="sub">Across the whole scan</div><table style="margin-top:6px"><tbody id="st-top"></tbody></table></div>
+        <div class="card"><h3>By file type</h3><div class="sub">Whole scan</div><table style="margin-top:6px"><tbody id="st-types"></tbody></table></div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<script>
+S.st=null;
+const COLORS_ST=['#5b8cff','#f59f45','#34c38f','#e5609a','#9b7bea','#e3c545','#3cc8c8'];
+function applyModules(){
+  const on=mod('storage');
+  document.querySelector('[data-mod=storage]').checked=on;
+  $('#m-lbl').textContent=on?'Active':'Off';
+  $('#off').classList.toggle('hide',on);$('#on').classList.toggle('hide',!on);
+  S.st=null;if(on)pollStorage();
+}
+async function pollStorage(){
+  if(!mod('storage'))return;
+  try{
+    if(!S.drivesLoaded){const dr=await api('/api/storage/drives');S.drivesLoaded=true;
+      $('#drives').innerHTML=dr.map(d=>`<div class="drv"><b>${esc(d.path)}</b> <span class="sub">${esc(d.fs)}</span><div class="sub">${fmtB(d.used)} used of ${fmtB(d.total)} · ${fmtB(d.free)} free</div><div class="bar"><i style="width:${d.used/d.total*100}%;background:${d.used/d.total>.9?'var(--bad)':'var(--accent)'}"></i></div></div>`).join('');
+      $('#st-drive').innerHTML='<option value="">Pick a drive…</option>'+dr.map(d=>`<option>${esc(d.path)}</option>`).join('')}
+    const st=await api('/api/storage/status');
+    $('#st-scan').classList.toggle('hide',st.running);$('#st-cancel').classList.toggle('hide',!st.running);
+    if(st.running)$('#st-prog').innerHTML=`Scanning <b>${esc(st.root)}</b> — ${st.files.toLocaleString()} files · ${fmtB(st.bytes)} · ${st.dirs.toLocaleString()} folders <span class="sub">· ${esc(st.current.slice(-70))}</span>`;
+    else if(st.has_result)$('#st-prog').innerHTML=`Scanned <b>${esc(st.root)}</b>: ${st.files.toLocaleString()} files, ${fmtB(st.bytes)} in ${Math.round(st.finished-st.started)}s${st.errors?` · ${st.errors} items skipped (no access)`:''}`;
+    if(st.has_result&&!st.running&&(!S.st||S.st.fin!==st.finished)){
+      S.st={fin:st.finished,root:st.root,path:[],node:null,sum:await api('/api/storage/summary')};await loadNode();renderSummary()}
+    $('#st-result').classList.toggle('hide',!st.has_result);
+    if(st.running){clearTimeout(pollStorage.t);pollStorage.t=setTimeout(pollStorage,1000)}
+  }catch(e){}
+}
+async function loadNode(){const r=await api('/api/storage/node?p='+encodeURIComponent(S.st.path.join('|')));S.st.node=r;renderNode()}
+function fullPath(parts){return parts.length?S.st.root.replace(/\\$/,'')+'\\'+parts.join('\\'):S.st.root}
+function renderNode(){
+  const n=S.st.node,tot=n.s||1;
+  const crumbs=[`<a href="#" data-crumb="0">${esc(S.st.root)}</a>`].concat(S.st.path.map((p,i)=>`<a href="#" data-crumb="${i+1}">${esc(p)}</a>`));
+  $('#st-crumb').innerHTML=crumbs.join(' › ')+` &nbsp;·&nbsp; <b>${fmtB(n.s)}</b> total, ${n.f.toLocaleString()} files`;
+  const row=(label,sz,files,col,extra,cls)=>`<tr class="${cls||''}" ${extra||''}><td>${label}</td><td>${fmtB(sz)} <span class="sub">${(sz/tot*100).toFixed(1)}%</span><div class="bar"><i style="width:${sz/tot*100}%;background:${col}"></i></div></td><td class="r sub">${files!=null?files.toLocaleString():''}</td><td class="r">${extra&&extra.includes('data-d')?`<button class="btn sm" data-reveal="${extra.match(/data-d="(\d+)"/)[1]}">Show</button>`:''}</td></tr>`;
+  let h=n.c.map((c,i)=>row(`<span class="name"><b>📁 ${esc(c.n)}</b></span>`,c.s,c.f,COLORS_ST[i%7],`data-d="${i}" data-has="${c.has?1:0}"`,'clk')).join('');
+  if(n.fb>0)h+=row('<span class="sub">📄 Files directly in this folder</span>',n.fb,null,'var(--muted)');
+  if(n.sm>0)h+=row('<span class="sub">Many small folders (&lt; 1 MB each)</span>',n.sm,null,'var(--muted)');
+  $('#st-rows').innerHTML=h||'<tr><td colspan="4" class="sub">Empty</td></tr>';
+}
+function renderSummary(){
+  const s=S.st.sum;
+  $('#st-top').innerHTML=s.top.slice(0,25).map((f,i)=>`<tr><td><div class="pathcell" title="${esc(f.path)}">&lrm;${esc(f.path)}</div></td><td class="r" style="white-space:nowrap">${fmtB(f.size)}</td><td class="r"><button class="btn sm" data-rf="${i}">Show</button></td></tr>`).join('');
+  const tm=Math.max(1,s.types[0]?.bytes||1);
+  $('#st-types').innerHTML=s.types.map((t,i)=>`<tr><td><b>${esc(t.ext)}</b> <span class="sub">${t.count.toLocaleString()} files</span><div class="bar"><i style="width:${t.bytes/tm*100}%;background:${COLORS_ST[i%7]}"></i></div></td><td class="r" style="white-space:nowrap">${fmtB(t.bytes)}</td></tr>`).join('');
+}
+$('#st-drive').onchange=e=>{if(e.target.value)$('#st-path').value=e.target.value};
+$('#st-scan').onclick=async()=>{const root=$('#st-path').value.trim()||$('#st-drive').value;if(!root){toast('Pick a drive or type a folder');return}
+  try{await api('/api/storage/scan',{root});S.st=null;pollStorage()}catch(e){toast('Cannot scan: '+e.message)}};
+$('#st-cancel').onclick=async()=>{await api('/api/storage/cancel',{});toast('Cancelling…');setTimeout(pollStorage,1200)};
+$('#st-crumb').onclick=async e=>{const i=e.target.dataset.crumb;if(i==null)return;e.preventDefault();S.st.path=S.st.path.slice(0,+i);await loadNode()};
+$('#st-rows').onclick=async e=>{
+  const b=e.target.closest('[data-reveal]');
+  if(b){const c=S.st.node.c[+b.dataset.reveal];await api('/api/reveal',{path:fullPath(S.st.path.concat(c.n))});return}
+  const tr=e.target.closest('tr[data-d]');if(!tr||tr.dataset.has!=='1')return;
+  S.st.path.push(S.st.node.c[+tr.dataset.d].n);await loadNode()};
+$('#st-top').onclick=async e=>{const b=e.target.closest('[data-rf]');if(b)await api('/api/reveal',{path:S.st.sum.top[+b.dataset.rf].path})};
+boot();
+</script>
+</body>
+</html>

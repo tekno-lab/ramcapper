@@ -26,7 +26,7 @@ from urllib.parse import parse_qs, urlparse
 
 import psutil
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 FROZEN = getattr(sys, "frozen", False)
 HERE = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))   # bundled resources
 APP_DIR = os.path.dirname(sys.executable) if FROZEN else os.path.dirname(os.path.abspath(__file__))
@@ -1392,9 +1392,12 @@ class Handler(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         q = {k: v[0] for k, v in parse_qs(u.query).items()}
         try:
-            if u.path in ("/", "/index.html"):
-                with open(os.path.join(HERE, "index.html"), "rb") as f:
-                    return self._send(200, f.read(), "text/html; charset=utf-8")
+            fname = "index.html" if u.path == "/" else u.path[1:]
+            if re.fullmatch(r"[a-z0-9_]+\.(html|css|js|png)", fname):          # the dashboard: one page per tab + shared css/js
+                fp = os.path.join(HERE, "web", fname)
+                if os.path.isfile(fp):
+                    with open(fp, "rb") as f:
+                        return self._send(200, f.read(), STATIC_TYPES[fname.rsplit(".", 1)[1]])
             if u.path == "/api/icon":
                 png = icon_png(q.get("name", "").lower())
                 if not png:
@@ -1407,6 +1410,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(png)
                 return
             if u.path == "/api/now":
+                if q.get("ui"):
+                    UI_SEEN[0] = time.time()
                 return self._send(200, now_payload())
             if u.path == "/api/history":
                 return self._send(200, history(q.get("range", "1h"), q.get("name") or None))
@@ -1490,7 +1495,11 @@ class Handler(BaseHTTPRequestHandler):
                     Net.force_ident = True      # a manual scan re-identifies every device
                     threading.Thread(target=net_scan, daemon=True).start()
                 return self._send(200, {})
+            if path == "/api/show":          # a second launch / the tray asks for the window
+                show_window()
+                return self._send(200, {})
             if path == "/api/closing":       # the window is about to close: tell the user the app is still running
+                UI_SEEN[0] = 0.0
                 tray_balloon("RamCapper is still running", "Monitoring and limits stay active. Click the tray icon to reopen, or right-click to quit.")
                 return self._send(200, {})
             if path == "/api/netrule":
@@ -1616,6 +1625,64 @@ def open_window():
             subprocess.Popen([exe, f"--app={url}", "--window-size=1320,900"])
             return
     webbrowser.open(url)
+
+
+STATIC_TYPES = {"html": "text/html; charset=utf-8", "css": "text/css; charset=utf-8",
+                "js": "application/javascript; charset=utf-8", "png": "image/png"}
+UI_SEEN = [0.0]     # last time a dashboard window polled us (it does so every 2 s while open)
+
+
+def focus_ui_window():
+    """Bring an already-open dashboard window to the front. True if one was found."""
+    found = []
+    PROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    user32.IsWindowVisible.argtypes = [wintypes.HWND]
+    user32.IsIconic.argtypes = [wintypes.HWND]
+    user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+    user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+    user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user32.EnumWindows.argtypes = [PROC, wintypes.LPARAM]
+
+    def cb(hwnd, _):
+        if user32.IsWindowVisible(hwnd):
+            n = user32.GetWindowTextLengthW(hwnd)
+            if 0 < n < 200:
+                buf = ctypes.create_unicode_buffer(n + 1)
+                user32.GetWindowTextW(hwnd, buf, n + 1)
+                cls = ctypes.create_unicode_buffer(64)
+                user32.GetClassNameW(hwnd, cls, 64)
+                t = buf.value
+                if cls.value == "Chrome_WidgetWin_1" and (t == "RamCapper" or t.endswith("· RamCapper")):
+                    found.append(hwnd)
+        return True
+
+    user32.EnumWindows(PROC(cb), 0)
+    if not found:
+        return False
+    hwnd = found[0]
+    if user32.IsIconic(hwnd):
+        user32.ShowWindow(hwnd, 9)                 # SW_RESTORE
+    user32.keybd_event(0x12, 0, 0, 0)              # tapping Alt lets SetForegroundWindow through
+    user32.keybd_event(0x12, 0, 2, 0)
+    user32.SetForegroundWindow(hwnd)
+    return True
+
+
+def show_window():
+    """Open the dashboard, or focus it if it is already open (never a second window)."""
+    if time.time() - UI_SEEN[0] < 6 and focus_ui_window():
+        return
+    open_window()
+
+
+def ask_running_to_show():
+    """Another copy is already running: ask it to show/focus its window."""
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{PORT}/api/show", data=b"{}", method="POST", headers={"X-RamCapper": "1"})
+        urllib.request.urlopen(req, timeout=3).read()
+    except Exception:
+        open_window()
 
 
 ADMIN = is_admin()
@@ -1790,7 +1857,7 @@ def _tray_thread(first_balloon):
         if msg == WM_TRAY:
             ev = lparam & 0xFFFF
             if ev in (0x0202, 0x0203):                       # left click / double click -> open the dashboard
-                open_window()
+                show_window()
             elif ev in (0x0205, 0x007B):                     # right click -> menu
                 pt = wintypes.POINT()
                 user32.GetCursorPos(ctypes.byref(pt))
@@ -1806,7 +1873,7 @@ def _tray_thread(first_balloon):
         if msg == WM_COMMAND:
             cmd = wparam & 0xFFFF
             if cmd == 1:
-                open_window()
+                show_window()
             elif cmd == 2:
                 threading.Thread(target=quit_app, daemon=True).start()
             return 0
@@ -1842,6 +1909,25 @@ def start_tray(first_balloon):
     threading.Thread(target=_tray_thread, args=(first_balloon,), daemon=True).start()
 
 
+def retire_other_version():
+    """If the copy already running is another version (e.g. an old exe left running), ask it to quit.
+    Returns True when a quit request was accepted. Same-version copies are left alone (single instance)."""
+    if getattr(retire_other_version, "tried", False):
+        return False
+    retire_other_version.tried = True
+    base = f"http://127.0.0.1:{PORT}"
+    try:
+        with urllib.request.urlopen(base + "/api/info", timeout=3) as r:
+            info = json.loads(r.read().decode("utf-8", "replace"))
+        if info.get("version") == VERSION:
+            return False
+        req = urllib.request.Request(base + "/api/quit", data=b"{}", method="POST", headers={"X-RamCapper": "1"})
+        urllib.request.urlopen(req, timeout=3).read()
+        return True
+    except Exception:
+        return False
+
+
 def main():
     no_open = "--no-open" in sys.argv
     takeover = "--takeover" in sys.argv
@@ -1857,8 +1943,11 @@ def main():
             except OSError:
                 k32.CloseHandle(single_instance.handle)
         if time.time() >= deadline:
+            if not takeover and retire_other_version():
+                deadline = time.time() + 10      # a different version was running: it is quitting, take its place
+                continue
             if not no_open:
-                open_window()              # already running - just show its window
+                ask_running_to_show()      # already running - just show/focus its window
             return
         time.sleep(0.4)
     SERVER["srv"] = srv

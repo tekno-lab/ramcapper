@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RamCapper</title>
+<link rel="icon" type="image/png" href="/logo.png">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body data-page="limiter" data-title="Limiter">
+<script src="/app.js"></script>
+<main class="main">
+  <header class="phead">
+    <div class="grow"><h1>Limiter</h1><p>Keep apps in check: alert, trim, hard-cap or end an app when it goes over its memory limit.</p></div>
+  </header>
+
+  <div class="grid2">
+    <div class="card">
+      <div class="row"><div class="grow"><h3>Emergency auto-trim</h3><div class="sub">Protects the whole system</div></div>
+        <label class="sw"><input type="checkbox" id="g-en"><s></s></label></div>
+      <p class="sub" style="margin:14px 0 8px">When system RAM crosses the threshold, RamCapper trims idle memory from every process it can reach. Apps keep running; Windows just reclaims what they aren't actively using.</p>
+      <div class="row"><input type="range" id="g-th" min="60" max="98" step="1"><b id="g-thv" style="width:48px;text-align:right">90%</b></div>
+      <div class="row" style="margin-top:12px"><span class="sub">Cool-down</span><input type="number" id="g-cd" min="15" max="3600" style="width:90px"><span class="sub">seconds between runs</span></div>
+    </div>
+    <div class="card">
+      <h3>How limits work</h3>
+      <ul class="help">
+        <li><b>Alert</b> – log an event and show a toast when the app goes over its limit.</li>
+        <li><b>Trim</b> – push the app's idle memory back to Windows. Safe; the app keeps running but may re-grow.</li>
+        <li><b>Hard cap</b> – Windows enforces a working-set ceiling (limit ÷ processes). The app pages instead of growing; no crash.</li>
+        <li><b>Terminate</b> – end every process of the app after it stays over for N checks (2 s each). Unsaved work is lost.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="card">
+    <h3>Per-app limits</h3><div class="sub">A limit applies to the app's total across all its processes (e.g. all chrome.exe).</div>
+    <table style="margin-top:10px"><thead><tr><th style="width:140px" title="Switch a limit off to pause it without deleting it">Enforced</th><th>App</th><th>Limit</th><th>Action</th><th>Now</th><th class="r"></th></tr></thead><tbody id="rules"></tbody></table>
+    <div class="form">
+      <div><label>App (executable)</label><div class="cb"><input type="text" id="f-name" placeholder="Search or type an app…" autocomplete="off"><div class="cbl hide" id="f-list"></div></div></div>
+      <div><label>Limit</label><div class="row" style="gap:6px"><input type="number" id="f-lim" min="1" value="2" step="any"><select id="f-unit" style="width:74px"><option>GB</option><option>MB</option></select></div></div>
+      <div><label>Action</label><select id="f-act"><option value="notify">Alert</option><option value="trim">Trim</option><option value="cap">Hard cap</option><option value="terminate">Terminate</option></select></div>
+      <div><label>Checks</label><input type="number" id="f-grace" value="3" min="1" max="60" title="Terminate only: consecutive 2s checks over the limit"></div>
+      <button class="btn primary" id="f-add">Add limit</button>
+    </div>
+  </section>
+</main>
+
+<script>
+const limitApp=()=>$('#f-name').value.trim().toLowerCase();
+let cbAct=0;
+function cbRender(){
+  const q=limitApp(),apps=(S.now?S.now.apps:[]).filter(a=>!q||a.name.includes(q));
+  const exact=apps.some(a=>a.name===q);
+  let h=apps.map(a=>`<div class="cbi" data-v="${esc(a.name)}">${icon(a.name)}<span>${esc(a.name)}</span><em>${fmtB(a.rss)}</em></div>`).join('');
+  if(q&&!exact)h+=`<div class="cbi" data-v="${esc(q)}"><span class="ico"></span><span>Use “${esc(q)}” <span class="sub">(not running)</span></span></div>`;
+  $('#f-list').innerHTML=h||'<div class="sub" style="padding:8px">No running apps</div>';
+  cbAct=Math.min(cbAct,$$('#f-list .cbi').length-1);cbMark();
+  const l=$('#f-list'),was=l.classList.contains('hide');l.classList.remove('hide','up');   // flip above the field when there's no room below
+  const below=innerHeight-l.parentElement.getBoundingClientRect().bottom,above=l.parentElement.getBoundingClientRect().top;
+  if(l.offsetHeight>below&&above>below)l.classList.add('up');if(was)l.classList.add('hide');
+}
+function cbMark(){$$('#f-list .cbi').forEach((e,i)=>{e.classList.toggle('act',i===cbAct);if(i===cbAct)e.scrollIntoView({block:'nearest'})})}
+function cbPick(v){$('#f-name').value=v;$('#f-list').classList.add('hide')}
+$('#f-name').onfocus=()=>{cbAct=0;cbRender();$('#f-list').classList.remove('hide')};
+$('#f-name').oninput=()=>{cbAct=0;cbRender();$('#f-list').classList.remove('hide')};
+$('#f-name').onkeydown=e=>{
+  const n=$$('#f-list .cbi').length;
+  if(e.key==='ArrowDown'){e.preventDefault();cbAct=Math.min(n-1,cbAct+1);cbMark()}
+  else if(e.key==='ArrowUp'){e.preventDefault();cbAct=Math.max(0,cbAct-1);cbMark()}
+  else if(e.key==='Enter'){const el=$$('#f-list .cbi')[cbAct];if(el&&!$('#f-list').classList.contains('hide')){e.preventDefault();cbPick(el.dataset.v)}}
+  else if(e.key==='Escape')$('#f-list').classList.add('hide');
+};
+$('#f-list').onmousedown=e=>{const it=e.target.closest('.cbi');if(it){e.preventDefault();cbPick(it.dataset.v)}};
+document.addEventListener('mousedown',e=>{if(!e.target.closest('.cb'))$('#f-list').classList.add('hide')});
+
+function renderRules(){
+  const n=S.now,c=S.cfg;if(!c)return;
+  const by={};if(n)n.apps.forEach(a=>by[a.name]=a.rss);
+  $('#rules').innerHTML=c.rules.map(r=>`<tr><td><div class="row" style="gap:8px"><label class="sw" title="Turn off to pause this limit without deleting it"><input type="checkbox" data-rt="${r.id}" ${r.enabled?'checked':''}><s></s></label><span class="${r.enabled?'':'sub'}">${r.enabled?'Active':'Paused'}</span></div></td>
+    <td><span class="name">${icon(r.name)}<b>${esc(r.name)}</b></span></td><td>${r.limit_mb>=1024?(r.limit_mb/1024).toFixed(r.limit_mb%1024?2:0)+' GB':r.limit_mb+' MB'}</td>
+    <td>${ACTL[r.action]}${r.action==='terminate'?` <span class="sub">(after ${r.grace}×2s)</span>`:''}</td>
+    <td class="${by[r.name]>r.limit_mb*MB?'up':''}">${by[r.name]!=null?fmtB(by[r.name]):'<span class="sub">not running</span>'}</td>
+    <td class="r"><button class="btn sm danger" data-rd="${r.id}">Delete</button></td></tr>`).join('')||'<tr><td colspan="6" class="sub">No limits yet — add one below, or press “Limit” on any app on the Memory page.</td></tr>';
+  const g=c.global;
+  if(document.activeElement!==$('#g-th')){$('#g-th').value=g.threshold;$('#g-thv').textContent=g.threshold+'%'}
+  $('#g-en').checked=g.enabled;if(document.activeElement!==$('#g-cd'))$('#g-cd').value=g.cooldown;
+}
+window.onNow=renderRules;window.onCfg=renderRules;
+document.body.addEventListener('click',e=>{
+  const d=e.target.closest('[data-rd]')?.dataset.rd;if(!d)return;
+  S.cfg.rules=S.cfg.rules.filter(r=>r.id!==d);saveCfg();
+});
+document.body.addEventListener('change',e=>{
+  const id=e.target.dataset.rt;if(!id)return;S.cfg.rules.find(r=>r.id===id).enabled=e.target.checked;saveCfg();
+});
+$('#g-en').onchange=e=>{S.cfg.global.enabled=e.target.checked;saveCfg()};
+$('#g-th').oninput=e=>{$('#g-thv').textContent=e.target.value+'%'};
+$('#g-th').onchange=e=>{S.cfg.global.threshold=+e.target.value;saveCfg()};
+$('#g-cd').onchange=e=>{S.cfg.global.cooldown=+e.target.value||60;saveCfg()};
+$('#f-add').onclick=()=>{
+  const name=limitApp();let lim=parseFloat($('#f-lim').value);
+  if(!name||!(lim>0)){toast('Enter an app name and a limit');return}
+  if($('#f-unit').value==='GB')lim*=1024;
+  const act=$('#f-act').value;
+  if(act==='terminate'&&!confirm(`${name} will be ENDED when it stays over the limit. Unsaved work in it would be lost. Add this rule?`))return;
+  S.cfg.rules.push({name,limit_mb:Math.round(lim),action:act,enabled:true,grace:+$('#f-grace').value||3});
+  $('#f-name').value='';saveCfg();toast('Limit added');
+};
+const pre=new URLSearchParams(location.search).get('app');   // arrives from the "Limit" button on the Memory page
+if(pre){$('#f-name').value=pre;setTimeout(()=>{$('#f-lim').focus();$('#f-lim').select();$('.form').scrollIntoView({block:'center'})},300)}
+boot();
+</script>
+</body>
+</html>

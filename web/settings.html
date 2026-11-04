@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RamCapper</title>
+<link rel="icon" type="image/png" href="/logo.png">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body data-page="settings" data-title="Settings">
+<script src="/app.js"></script>
+<main class="main">
+  <header class="phead">
+    <div class="grow"><h1>Settings</h1><p>Where RamCapper keeps its data, and the permissions it runs with.</p></div>
+  </header>
+  <div class="grid2">
+    <div class="card">
+      <h3>Data folder</h3><div class="sub">Where RamCapper keeps <b>history.db</b> (memory history, events, devices) and <b>config.json</b> (limits, switches).</div>
+      <div class="stat" style="margin-top:14px"><span>Current location</span><b id="i-dir" style="word-break:break-all;font-size:13.5px">–</b><span id="i-meta" style="margin-top:2px"></span></div>
+      <div id="i-fixed" class="sub hide" style="margin-top:10px;color:var(--warn)"></div>
+      <div id="i-change">
+        <div class="row" style="margin-top:14px;gap:8px"><input type="text" id="i-new" class="grow" placeholder="e.g. E:\RamCapperData"><button class="btn primary" id="i-move">Move here</button></div>
+        <div class="sub" style="margin-top:8px">Your history and settings are copied to the new folder (existing data there is never overwritten), then RamCapper restarts itself. The old files are left in place.</div>
+        <button class="btn sm" id="i-reset" style="margin-top:12px">Reset to default (next to the program)</button>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Administrator access</h3>
+      <div class="sub" id="i-admin" style="margin:8px 0 14px"></div>
+      <button class="btn primary" id="i-elev">Restart as administrator</button>
+      <div class="sub" style="margin-top:12px">Windows will show its permission prompt. Admin lets RamCapper trim, cap and end elevated and system processes, see more connections, and create network limits.</div>
+    </div>
+  </div>
+  <section class="card">
+    <h3>About</h3>
+    <div class="kv" id="about"></div>
+    <div class="sub" style="margin-top:12px">Only one copy of RamCapper runs at a time. Starting it again just brings the existing window to the front. A newer version replaces an older one that is still running.</div>
+  </section>
+</main>
+<script>
+window.onInfo=i=>{
+  $('#i-dir').textContent=i.data_dir;$('#i-meta').textContent=`history.db ${fmtB(i.db_size)}`;
+  const fixed=i.data_source==='arg'||i.data_source==='env';
+  $('#i-fixed').classList.toggle('hide',!fixed);$('#i-change').classList.toggle('hide',fixed);
+  $('#i-fixed').textContent=fixed?'This copy was started with a fixed data folder ('+(i.data_source==='arg'?'--data option':'RAMCAPPER_DATA variable')+'), so it can’t be changed from here.':'';
+  $('#i-admin').innerHTML=i.admin?'<span class="st on"><i></i>Running as administrator</span>':'<span class="st"><i></i>Running with normal permissions</span>';
+  $('#i-elev').classList.toggle('hide',i.admin);
+  $('#about').innerHTML=[['Version',i.version],['Mode',i.frozen?'Portable executable':'Running from source'],['Local address','http://127.0.0.1:'+i.port],['Program folder',i.app_dir]]
+    .map(([k,v])=>`<span>${k}</span><span style="word-break:break-all">${esc(v)}</span>`).join('');
+};
+$('#i-elev').onclick=elevate;
+async function relocate(body,ask){
+  if(!confirm(ask))return;
+  try{const r=await api('/api/relocate',body);waitForRestart('Moved to '+r.dest+'<br><span style="font-size:13px">'+(r.note.join(', ')||'data copied')+' — restarting…</span>')}catch(e){toast(e.message)}
+}
+$('#i-move').onclick=()=>{const p=$('#i-new').value.trim();if(!p){toast('Enter a folder path first');return}relocate({path:p},`Move RamCapper's data to:\n${p}\n\nRamCapper will restart.`)};
+$('#i-reset').onclick=()=>relocate({reset:true},'Use the default data folder (next to the program)? RamCapper will restart.');
+boot();
+</script>
+</body>
+</html>
