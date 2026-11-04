@@ -578,7 +578,7 @@ window.addEventListener('resize',()=>{renderChart();renderDrawer()});
 async function loadInfo(){
   try{
     const i=S.info=await api('/api/info');
-    $('#i-dir').textContent=i.data_dir;$('#i-meta').textContent=`history.db ${fmtB(i.db_size)}`;
+    $('#i-dir').textContent=i.data_dir;$('#i-meta').textContent=`history.db ${fmtB(i.db_size)} · RamCapper v${i.version}`;document.title=`RamCapper ${i.version}`;
     const fixed=i.data_source==='arg'||i.data_source==='env';
     $('#i-fixed').classList.toggle('hide',!fixed);$('#i-change').classList.toggle('hide',fixed);
     $('#i-fixed').textContent=fixed?'This copy was started with a fixed data folder ('+(i.data_source==='arg'?'--data option':'RAMCAPPER_DATA variable')+'), so it can’t be changed from here.':'';

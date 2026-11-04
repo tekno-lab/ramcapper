@@ -26,6 +26,7 @@ from urllib.parse import parse_qs, urlparse
 
 import psutil
 
+VERSION = "1.1.0"
 FROZEN = getattr(sys, "frozen", False)
 HERE = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))   # bundled resources
 APP_DIR = os.path.dirname(sys.executable) if FROZEN else os.path.dirname(os.path.abspath(__file__))
@@ -1368,7 +1369,7 @@ def quit_app():
 
 # ---------------------------------------------------------------- http
 class Handler(BaseHTTPRequestHandler):
-    server_version = "RamCapper"
+    server_version = "RamCapper/" + VERSION
 
     def log_message(self, *a):
         pass
@@ -1425,7 +1426,7 @@ class Handler(BaseHTTPRequestHandler):
                 except OSError:
                     size = 0
                 return self._send(200, {"admin": ADMIN, "data_dir": DATA_DIR, "data_source": DATA_SOURCE, "app_dir": APP_DIR,
-                                        "db_size": size, "frozen": FROZEN, "port": PORT})
+                                        "db_size": size, "frozen": FROZEN, "port": PORT, "version": VERSION})
             if u.path == "/api/net":
                 if not module_on("network"):
                     return self._send(409, {"error": "network module is off"})
@@ -1823,7 +1824,7 @@ def _tray_thread(first_balloon):
     nid = NOTIFYICONDATAW()
     nid.cbSize, nid.hWnd, nid.uID = ctypes.sizeof(nid), hwnd, 1
     nid.uFlags, nid.uCallbackMessage, nid.hIcon = NIF_MESSAGE | NIF_ICON | NIF_TIP, WM_TRAY, _tray_icon_handle()
-    nid.szTip = "RamCapper - running (click to open)"
+    nid.szTip = "RamCapper " + VERSION + " - running (click to open)"
     TRAY["nid"] = nid
     if not shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid)):
         print("tray icon could not be added", file=sys.stderr)
