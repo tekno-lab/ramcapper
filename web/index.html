@@ -44,7 +44,7 @@
 
   <section class="card">
     <div class="toolbar"><h3 style="margin:0">Apps</h3><input type="text" class="search" id="search" placeholder="Filter apps…"><span class="sub">Memory = working set (like Task Manager's "Memory" column, incl. shared pages). Grouped by executable.</span></div>
-    <table><thead><tr><th>App</th><th style="width:200px">Memory</th><th class="r">Δ 5 min</th><th>Trend</th><th>Limit</th><th class="r">Actions</th></tr></thead><tbody id="apps"></tbody></table>
+    <table id="apps-t"></table>
   </section>
 </main>
 
@@ -76,23 +76,25 @@ function renderGauge(s){
   $('#s-used').textContent=fmtB(s.used);$('#s-avail').textContent=fmtB(s.avail);
   $('#s-commit').textContent=fmtB(s.commit_used)+' / '+fmtB(s.commit_limit);
 }
+let appMax=1;
+const appsDT=DataTable($('#apps-t'),{key:'apps',sort:'mem',dir:-1,empty:'No matching apps',cols:[
+  {id:'app',label:'App',fixed:true,val:r=>r.name,first:'asc',render:a=>`<div class="name" data-open="${esc(a.name)}"><i class="dot" style="background:${colorOf(a.name)}"></i>${icon(a.name)}<b>${esc(a.name)}</b><span class="sub">${a.procs>1?a.procs+' procs':''}</span></div>`},
+  {id:'mem',label:'Memory',w:'200px',val:r=>r.rss,render:a=>`${fmtB(a.rss)}<div class="bar"><i style="width:${a.rss/appMax*100}%;background:${colorOf(a.name)}"></i></div>`},
+  {id:'d5',label:'Δ 5 min',th:'r',td:'r',val:r=>r.d5,menu:'Change in 5 minutes',cls:a=>a.d5>20*MB?'up':a.d5<-20*MB?'down':'flat',render:a=>fmtD(a.d5)},
+  {id:'trend',label:'Trend',render:a=>{const sp=a.spark,mx=Math.max(1,...sp),mn=Math.min(...sp);
+    const pts=sp.map((v,i)=>`${(i/(Math.max(1,sp.length-1))*84).toFixed(1)},${(22-(v-mn)/Math.max(1,mx-mn)*20).toFixed(1)}`).join(' ');
+    return `<svg width="84" height="24"><polyline points="${pts}" fill="none" stroke="${colorOf(a.name)}" stroke-width="1.6" stroke-linejoin="round"/></svg>`}},
+  {id:'private',label:'Private',th:'r',td:'r',val:r=>r.private,off:true,render:a=>fmtB(a.private)},
+  {id:'procs',label:'Processes',th:'r',td:'r',val:r=>r.procs,off:true,render:a=>a.procs},
+  {id:'limit',label:'Limit',render:a=>ruleFor(a.name).map(r=>`<a class="pill ${r.enabled?'':'off'}" href="/limiter.html" title="Edit in Limiter">${r.limit_mb>=1024?(r.limit_mb/1024).toFixed(r.limit_mb%1024?1:0)+' GB':r.limit_mb+' MB'} · ${ACTL[r.action]}</a>`).join(' ')},
+  {id:'act',label:'Actions',th:'r',td:'r',fixed:true,render:a=>`<button class="btn sm" data-trim="${esc(a.name)}">Trim</button> <button class="btn sm" data-limit="${esc(a.name)}">Limit</button>${a.protected?'':` <button class="btn sm danger" data-kill="${esc(a.name)}" data-procs="${a.procs}" title="End all ${a.procs} process(es) of ${esc(a.name)}">Kill</button>`}`},
+]});
 function renderApps(){
   const n=S.now;if(!n)return;
   $('#s-procs').textContent=n.apps.reduce((a,x)=>a+x.procs,0)+'+';
   const q=$('#search').value.trim().toLowerCase();
-  const list=n.apps.filter(a=>!q||a.name.includes(q));
-  const max=Math.max(1,...n.apps.map(a=>a.rss));
-  $('#apps').innerHTML=list.map(a=>{
-    const c=colorOf(a.name),d=a.d5,cls=d>20*MB?'up':d<-20*MB?'down':'flat';
-    const sp=a.spark,mx=Math.max(1,...sp),mn=Math.min(...sp);
-    const pts=sp.map((v,i)=>`${(i/(Math.max(1,sp.length-1))*84).toFixed(1)},${(22-(v-mn)/Math.max(1,mx-mn)*20).toFixed(1)}`).join(' ');
-    const pills=ruleFor(a.name).map(r=>`<a class="pill ${r.enabled?'':'off'}" href="/limiter.html" title="Edit in Limiter">${r.limit_mb>=1024?(r.limit_mb/1024).toFixed(r.limit_mb%1024?1:0)+' GB':r.limit_mb+' MB'} · ${ACTL[r.action]}</a>`).join(' ');
-    return `<tr><td><div class="name" data-open="${esc(a.name)}"><i class="dot" style="background:${c}"></i>${icon(a.name)}<b>${esc(a.name)}</b><span class="sub">${a.procs>1?a.procs+' procs':''}</span></div></td>
-      <td>${fmtB(a.rss)}<div class="bar"><i style="width:${a.rss/max*100}%;background:${c}"></i></div></td>
-      <td class="r ${cls}">${fmtD(d)}</td>
-      <td><svg width="84" height="24"><polyline points="${pts}" fill="none" stroke="${c}" stroke-width="1.6" stroke-linejoin="round"/></svg></td>
-      <td>${pills}</td>
-      <td class="r"><button class="btn sm" data-trim="${esc(a.name)}">Trim</button> <button class="btn sm" data-limit="${esc(a.name)}">Limit</button>${a.protected?'':` <button class="btn sm danger" data-kill="${esc(a.name)}" data-procs="${a.procs}" title="End all ${a.procs} process(es) of ${esc(a.name)}">Kill</button>`}</td></tr>`}).join('')||'<tr><td colspan="6" class="sub">No matching apps</td></tr>';
+  appMax=Math.max(1,...n.apps.map(a=>a.rss));
+  appsDT.render(n.apps.filter(a=>!q||a.name.includes(q)));
 }
 function renderDrawer(det){
   const a=S.now&&S.now.apps.find(x=>x.name===S.open);

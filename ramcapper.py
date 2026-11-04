@@ -26,7 +26,7 @@ from urllib.parse import parse_qs, urlparse
 
 import psutil
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 FROZEN = getattr(sys, "frozen", False)
 HERE = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))   # bundled resources
 APP_DIR = os.path.dirname(sys.executable) if FROZEN else os.path.dirname(os.path.abspath(__file__))
@@ -746,6 +746,7 @@ def net_tick(now):
         dt = max(0.1, now - t0)
         Net.rate.append((now, max(0, io.bytes_recv - r0) / dt, max(0, io.bytes_sent - s0) / dt))
     Net.last_io = (now, io.bytes_recv, io.bytes_sent)
+    bw_tick(now)
     if not Net.scanning and now - Net.last_scan > 120:
         Net.last_scan = now
         threading.Thread(target=net_scan, daemon=True).start()
@@ -1147,13 +1148,234 @@ def net_devices():
     return rows
 
 
+
+# ---- per-app bandwidth: ETW "Microsoft-Windows-Kernel-Network" (TCP + UDP, IPv4 + IPv6). Windows only lets administrators
+# start the trace, so without admin the Network page shows connection counts only.
+class BW:
+    NAME = "RamCapperNet"
+    started = False
+    error = ""
+    handle = 0
+    lock = threading.Lock()
+    pid_bytes = {}          # pid -> [rx, tx] cumulative since the trace started
+    last = {}               # pid -> (rx, tx) at the previous tick
+    names = {}              # pid -> exe name
+    rates = {}              # exe name -> [down B/s, up B/s]
+    totals = {}             # exe name -> [rx, tx] since the trace started
+    last_t = 0.0
+    keep = None             # keeps ctypes callbacks alive
+
+
+def _bw_defs():
+    from ctypes import Structure, c_ulong, c_ulonglong, c_longlong, c_ushort, c_ubyte, c_long, c_void_p, c_wchar_p, POINTER
+
+    class GUID(Structure):
+        _fields_ = [("a", c_ulong), ("b", c_ushort), ("c", c_ushort), ("d", c_ubyte * 8)]
+
+    class WNODE(Structure):
+        _fields_ = [("BufferSize", c_ulong), ("ProviderId", c_ulong), ("Historical", c_ulonglong), ("TimeStamp", c_longlong),
+                    ("Guid", GUID), ("ClientContext", c_ulong), ("Flags", c_ulong)]
+
+    class PROPS(Structure):
+        _fields_ = [("Wnode", WNODE), ("BufferSize", c_ulong), ("MinimumBuffers", c_ulong), ("MaximumBuffers", c_ulong),
+                    ("MaximumFileSize", c_ulong), ("LogFileMode", c_ulong), ("FlushTimer", c_ulong), ("EnableFlags", c_ulong),
+                    ("AgeLimit", c_long), ("NumberOfBuffers", c_ulong), ("FreeBuffers", c_ulong), ("EventsLost", c_ulong),
+                    ("BuffersWritten", c_ulong), ("LogBuffersLost", c_ulong), ("RealTimeBuffersLost", c_ulong),
+                    ("LoggerThreadId", c_void_p), ("LogFileNameOffset", c_ulong), ("LoggerNameOffset", c_ulong)]
+
+    class EVENT_TRACE(Structure):
+        _fields_ = [("Header", c_ubyte * 48), ("InstanceId", c_ulong), ("ParentInstanceId", c_ulong), ("ParentGuid", GUID),
+                    ("MofData", c_void_p), ("MofLength", c_ulong), ("ClientContext", c_ulong)]
+
+    class LOGFILE_HEADER(Structure):
+        _fields_ = [("BufferSize", c_ulong), ("Version", c_ulong), ("ProviderVersion", c_ulong), ("NumberOfProcessors", c_ulong),
+                    ("EndTime", c_longlong), ("TimerResolution", c_ulong), ("MaximumFileSize", c_ulong), ("LogFileMode", c_ulong),
+                    ("BuffersWritten", c_ulong), ("LogInstanceGuid", GUID), ("LoggerName", c_wchar_p), ("LogFileName", c_wchar_p),
+                    ("TimeZone", c_ubyte * 172), ("BootTime", c_longlong), ("PerfFreq", c_longlong), ("StartTime", c_longlong),
+                    ("ReservedFlags", c_ulong), ("BuffersLost", c_ulong)]
+
+    class EVENT_RECORD(Structure):
+        _fields_ = [("Size", c_ushort), ("HeaderType", c_ushort), ("Flags", c_ushort), ("EventProperty", c_ushort),
+                    ("ThreadId", c_ulong), ("ProcessId", c_ulong), ("TimeStamp", c_longlong), ("Provider", GUID),
+                    ("Id", c_ushort), ("Version", c_ubyte), ("Channel", c_ubyte), ("Level", c_ubyte), ("Opcode", c_ubyte),
+                    ("Task", c_ushort), ("Keyword", c_ulonglong), ("Processor", c_ulonglong), ("Activity", GUID),
+                    ("BufferContext", c_ulong), ("ExtendedDataCount", c_ushort), ("UserDataLength", c_ushort),
+                    ("ExtendedData", c_void_p), ("UserData", c_void_p), ("UserContext", c_void_p)]
+
+    CB = ctypes.WINFUNCTYPE(None, POINTER(EVENT_RECORD))
+
+    class LOGFILE(Structure):
+        _fields_ = [("LogFileName", c_wchar_p), ("LoggerName", c_wchar_p), ("CurrentTime", c_longlong), ("BuffersRead", c_ulong),
+                    ("ProcessTraceMode", c_ulong), ("CurrentEvent", EVENT_TRACE), ("LogfileHeader", LOGFILE_HEADER),
+                    ("BufferCallback", c_void_p), ("BufferSize", c_ulong), ("Filled", c_ulong), ("EventsLost", c_ulong),
+                    ("EventRecordCallback", CB), ("IsKernelTrace", c_ulong), ("Context", c_void_p)]
+    return GUID, PROPS, LOGFILE, CB, EVENT_RECORD
+
+
+_BW_SEND = {10, 26, 42, 58}
+_BW_RECV = {11, 27, 43, 59}
+
+
+def _bw_on_event(rec_p):
+    try:
+        r = rec_p.contents
+        i = r.Id
+        send = i in _BW_SEND
+        if not send and i not in _BW_RECV:
+            return
+        n = r.UserDataLength
+        if n < 8:
+            return
+        d = ctypes.string_at(r.UserData, min(n, 48))
+        pid, size = struct.unpack_from("<II", d, 0)
+        v6 = i in (26, 27, 58, 59)
+        daddr = d[8:24] if v6 else d[8:12]
+        if (not v6 and daddr[0] == 127) or (v6 and daddr == b"\x00" * 15 + b"\x01"):
+            return                                                    # loopback is not network traffic
+        with BW.lock:
+            e = BW.pid_bytes.setdefault(pid, [0, 0])
+            e[1 if send else 0] += size
+    except Exception:
+        pass
+
+
+def bw_start():
+    """Start the ETW session (admin only). Sets BW.error when it cannot run."""
+    if BW.started:
+        return
+    if not ADMIN:
+        BW.error = "admin"
+        return
+    try:
+        GUID, PROPS, LOGFILE, CB, EVENT_RECORD = _bw_defs()
+        adv = ctypes.WinDLL("advapi32", use_last_error=True)
+        for fn in ("StartTraceW", "ControlTraceW", "EnableTraceEx2", "ProcessTrace", "CloseTrace"):
+            getattr(adv, fn).restype = ctypes.c_ulong
+        adv.OpenTraceW.restype = ctypes.c_ulonglong
+        adv.OpenTraceW.argtypes = [ctypes.POINTER(LOGFILE)]
+        adv.ProcessTrace.argtypes = [ctypes.POINTER(ctypes.c_ulonglong), ctypes.c_ulong, ctypes.c_void_p, ctypes.c_void_p]
+        adv.CloseTrace.argtypes = [ctypes.c_ulonglong]
+        adv.StartTraceW.argtypes = [ctypes.POINTER(ctypes.c_ulonglong), ctypes.c_wchar_p, ctypes.c_void_p]
+        adv.ControlTraceW.argtypes = [ctypes.c_ulonglong, ctypes.c_wchar_p, ctypes.c_void_p, ctypes.c_ulong]
+        adv.EnableTraceEx2.argtypes = [ctypes.c_ulonglong, ctypes.POINTER(GUID), ctypes.c_ulong, ctypes.c_ubyte,
+                                       ctypes.c_ulonglong, ctypes.c_ulonglong, ctypes.c_ulong, ctypes.c_void_p]
+        size = ctypes.sizeof(PROPS) + 2 * 64
+        buf = ctypes.create_string_buffer(size)
+        props = PROPS.from_buffer(buf)
+
+        def init():
+            ctypes.memset(buf, 0, size)
+            props.Wnode.BufferSize = size
+            props.Wnode.Flags = 0x00020000          # WNODE_FLAG_TRACED_GUID
+            props.Wnode.ClientContext = 1
+            props.LogFileMode = 0x00000100          # EVENT_TRACE_REAL_TIME_MODE
+            props.LoggerNameOffset = ctypes.sizeof(PROPS)
+        init()
+        adv.ControlTraceW(0, BW.NAME, buf, 1)       # stop a session left behind by a crashed copy
+        init()
+        h = ctypes.c_ulonglong(0)
+        err = adv.StartTraceW(ctypes.byref(h), BW.NAME, buf)
+        if err:
+            BW.error = f"StartTrace failed ({err})"
+            return
+        prov = GUID(0x7DD42A49, 0x5329, 0x4832, (ctypes.c_ubyte * 8)(0x8D, 0xFD, 0x43, 0xD9, 0x79, 0x15, 0x3A, 0x88))
+        err = adv.EnableTraceEx2(h.value, ctypes.byref(prov), 1, 5, 0xFFFFFFFFFFFFFFFF, 0, 0, None)
+        if err:
+            adv.ControlTraceW(h.value, None, buf, 1)
+            BW.error = f"EnableTrace failed ({err})"
+            return
+        cb = CB(_bw_on_event)
+        lf = LOGFILE()
+        lf.LoggerName = BW.NAME
+        lf.ProcessTraceMode = 0x00000100 | 0x10000000      # real time | event records
+        lf.EventRecordCallback = cb
+        th = adv.OpenTraceW(ctypes.byref(lf))
+        if th in (0xFFFFFFFFFFFFFFFF, 0xFFFFFFFF):
+            adv.ControlTraceW(h.value, None, buf, 1)
+            BW.error = "OpenTrace failed"
+            return
+        BW.keep = (cb, lf, buf, props, adv)
+        BW.handle = h.value
+        hh = ctypes.c_ulonglong(th)
+        threading.Thread(target=lambda: adv.ProcessTrace(ctypes.byref(hh), 1, None, None), daemon=True).start()
+        BW.started = True
+        BW.error = ""
+        BW.last_t = time.time()
+        atexit.register(bw_stop)
+    except Exception as e:
+        BW.error = f"{type(e).__name__}: {e}"
+
+
+def bw_stop():
+    if not BW.started:
+        return
+    BW.started = False
+    try:
+        adv, buf = BW.keep[4], BW.keep[2]
+        adv.ControlTraceW(BW.handle, None, buf, 1)
+    except Exception:
+        pass
+    with BW.lock:
+        BW.pid_bytes.clear()
+    BW.last = {}
+    BW.rates, BW.totals = {}, {}
+
+
+def _bw_name(pid):
+    n = BW.names.get(pid)
+    if n is None:
+        try:
+            n = psutil.Process(pid).name() if pid else "System"
+        except psutil.Error:
+            n = f"pid {pid}"
+        BW.names[pid] = n
+    return n
+
+
+def bw_tick(now):
+    """Turn the cumulative per-PID counters into per-app rates (called every sampler tick)."""
+    if not BW.started:
+        bw_start()
+        return
+    dt = max(0.2, now - BW.last_t)
+    BW.last_t = now
+    with BW.lock:
+        snap = {pid: tuple(v) for pid, v in BW.pid_bytes.items()}
+    rates, tot = {}, {}
+    for pid, (rx, tx) in snap.items():
+        a = _bw_name(pid)
+        t = tot.setdefault(a, [0, 0])
+        t[0] += rx
+        t[1] += tx
+        prx, ptx = BW.last.get(pid, (rx, tx))
+        r = rates.setdefault(a, [0.0, 0.0])
+        r[0] += max(0, rx - prx) / dt
+        r[1] += max(0, tx - ptx) / dt
+    BW.last = snap
+    BW.rates, BW.totals = rates, tot
+    if len(BW.names) > 4000:
+        BW.names.clear()
+
+
+def bw_payload():
+    if not ADMIN:
+        return {"available": False, "reason": "admin", "apps": []}
+    if not BW.started:
+        return {"available": False, "reason": BW.error or "starting", "apps": []}
+    apps = []
+    for name, (rx, tx) in BW.totals.items():
+        r = BW.rates.get(name, [0.0, 0.0])
+        apps.append({"name": name, "down": round(r[0]), "up": round(r[1]), "rx": rx, "tx": tx})
+    return {"available": True, "reason": "", "apps": apps}
+
+
 def net_payload():
     rate = list(Net.rate)
     io = psutil.net_io_counters()
     conns = net_connections()
     return {"conns": conns, "rate": [[round(t), d, u] for t, d, u in rate], "total_down": io.bytes_recv, "total_up": io.bytes_sent,
             "devices": net_devices(), "scanning": Net.scanning, "scan_finished": Net.scan_finished,
-            "subnet": Net.subnet, "my_ip": Net.my_ip, "admin": ADMIN,
+            "subnet": Net.subnet, "my_ip": Net.my_ip, "admin": ADMIN, "bw": bw_payload(),
             "netrules": [dict(r, status=NET_STATUS.get(r["id"], "")) for r in CFG.get("netrules", [])]}
 
 
@@ -1359,6 +1581,7 @@ def quit_app():
     """Release hard caps, flush the DB and exit the whole process."""
     try:
         tray_remove()
+        bw_stop()
         release_caps()
         with wlock:
             wdb.commit()
@@ -1481,6 +1704,7 @@ class Handler(BaseHTTPRequestHandler):
                     save_cfg()
                 if not on:
                     if name == "network":
+                        bw_stop()
                         Net.last_io = None
                         Net.rate.clear()
                         Net.last_scan = 0.0
@@ -1501,7 +1725,10 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/closing":       # the window is about to close: tell the user the app is still running
                 UI_SEEN[0] = 0.0
                 tray_balloon("RamCapper is still running", "Monitoring and limits stay active. Click the tray icon to reopen, or right-click to quit.")
-                return self._send(200, {})
+                closed = bool(find_ui_windows())
+                if closed:
+                    threading.Timer(0.25, close_ui_window).start()   # after this response has been delivered
+                return self._send(200, {"closed": closed})
             if path == "/api/netrule":
                 if not module_on("network"):
                     return self._send(409, {"error": "network module is off"})
@@ -1632,8 +1859,8 @@ STATIC_TYPES = {"html": "text/html; charset=utf-8", "css": "text/css; charset=ut
 UI_SEEN = [0.0]     # last time a dashboard window polled us (it does so every 2 s while open)
 
 
-def focus_ui_window():
-    """Bring an already-open dashboard window to the front. True if one was found."""
+def find_ui_windows():
+    """Handles of open RamCapper app windows (title "... · RamCapper"; a normal browser tab has a " - Edge" suffix)."""
     found = []
     PROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
     user32.IsWindowVisible.argtypes = [wintypes.HWND]
@@ -1658,6 +1885,22 @@ def focus_ui_window():
         return True
 
     user32.EnumWindows(PROC(cb), 0)
+    return found
+
+
+def close_ui_window():
+    """Close the dashboard window (the app keeps running). True if a window was found."""
+    user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    found = find_ui_windows()
+    for h in found:
+        user32.PostMessageW(h, 0x0010, 0, 0)       # WM_CLOSE
+    UI_SEEN[0] = 0.0
+    return bool(found)
+
+
+def focus_ui_window():
+    """Bring an already-open dashboard window to the front. True if one was found."""
+    found = find_ui_windows()
     if not found:
         return False
     hwnd = found[0]

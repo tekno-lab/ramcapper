@@ -26,11 +26,12 @@
     <div class="card"><h3>Throughput</h3><div class="sub">Whole machine, last 5 minutes · <span style="color:#5b8cff">■</span> download <span style="color:#f59f45">■</span> upload</div><div class="chartbox" style="height:130px"><canvas id="ratechart"></canvas></div></div>
     <div class="card">
       <div class="row"><div class="grow"><h3>Devices on your network</h3><div class="sub" id="dev-sub">–</div></div><button class="btn sm" id="dev-scan">Scan now</button></div>
-      <table style="margin-top:8px"><thead><tr><th>Device</th><th>IP</th><th>MAC</th><th>Status</th><th>First seen</th></tr></thead><tbody id="devices"></tbody></table>
+      <table id="dev-t" style="margin-top:8px"></table>
     </div>
     <div class="card">
-      <h3>Apps using the network</h3><div class="sub">Established connections per app. Click an app to filter the connection list below.</div>
-      <table style="margin-top:8px"><thead><tr><th>App</th><th class="r">Connections</th><th class="r">Remote hosts</th><th>Limit</th><th class="r">Actions</th></tr></thead><tbody id="net-apps"></tbody></table>
+      <div class="row"><div class="grow"><h3>Apps using the network</h3><div class="sub" id="bw-sub">Real-time bandwidth per app, busiest first. Click a column to sort; ⋮ shows or hides columns. Click an app to filter the connection list below.</div></div></div>
+      <div class="banner hide" id="bw-note" style="margin:12px 0 0"></div>
+      <table id="app-t" style="margin-top:8px"></table>
     </div>
     <div class="card">
       <h3>Network limits</h3>
@@ -46,7 +47,7 @@
     </div>
     <div class="card">
       <div class="toolbar"><h3 style="margin:0">Connections</h3><input type="text" class="search" id="conn-filter" placeholder="Filter by app, IP, host, port…"><label class="row sub" style="gap:6px"><input type="checkbox" id="conn-listen"> show listening ports</label></div>
-      <table><thead><tr><th>App</th><th>Proto</th><th>Local</th><th>Remote</th><th>State</th><th class="r"></th></tr></thead><tbody id="conns"></tbody></table>
+      <table id="conn-t"></table>
     </div>
   </div>
 </main>
@@ -89,38 +90,71 @@ async function pollNet(){
     $('#dev-sub').textContent=(d.subnet?d.subnet+' · ':'')+online+' online, '+d.devices.length+' known'+(d.scanning?' · scanning…':d.scan_finished?' · last scan '+new Date(d.scan_finished*1000).toLocaleTimeString():'');
     $('#dev-scan').disabled=d.scanning;
     const oldest=Math.min(...d.devices.map(x=>x.first_seen)),nowS=Date.now()/1000;
-    $('#devices').innerHTML=d.devices.map(x=>{
-      const isNew=x.first_seen-oldest>600&&nowS-x.first_seen<86400;
-      const nm=x.label||x.host||(x.vendor?x.vendor+' device':'Unknown device');
-      const sub=[x.kind,x.vendor&&!nm.startsWith(x.vendor)?x.vendor:''].filter(Boolean).join(' · ');
-      return `<tr><td><b>${esc(nm)}</b> <a href="#" class="sub" data-ren="${esc(x.mac)}" data-cur="${esc(x.label||'')}" title="Give this device your own name" style="text-decoration:none">✎</a>${sub?`<div class="sub">${esc(sub)}</div>`:''}${x.me?'<span class="badge">this PC</span>':''}${x.gateway?'<span class="badge">router</span>':''}${x.random?'<span class="badge" title="Phones/laptops often use a randomized MAC for privacy">private MAC</span>':''}${isNew?'<span class="badge new">NEW</span>':''}</td>
-      <td>${esc(x.ip)}</td><td class="sub">${esc(x.mac)}</td>
-      <td><span class="st ${x.online?'on':''}"><i></i>${x.online?'Online':'Last seen '+new Date(x.last_seen*1000).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})}</span></td>
-      <td class="sub">${new Date(x.first_seen*1000).toLocaleDateString([], {month:'short',day:'numeric'})}</td></tr>`}).join('')||`<tr><td colspan="5" class="sub">${d.scanning?'Scanning your network…':'No devices found yet.'}</td></tr>`;
+    devDT.render(d.devices.map(x=>Object.assign({},x,{isNew:x.first_seen-oldest>600&&nowS-x.first_seen<86400,nm:x.label||x.host||(x.vendor?x.vendor+' device':'Unknown device')})));
     renderConns();
   }catch(e){}
 }
+const ipNum=ip=>ip.split('.').reduce((a,b)=>a*256+(+b||0),0);
+const devDT=DataTable($('#dev-t'),{key:'devices',empty:'No devices found yet.',cols:[
+  {id:'dev',label:'Device',fixed:true,val:x=>x.nm,first:'asc',render:x=>{const sub=[x.kind,x.vendor&&!x.nm.startsWith(x.vendor)?x.vendor:''].filter(Boolean).join(' · ');
+    return `<b>${esc(x.nm)}</b> <a href="#" class="sub" data-ren="${esc(x.mac)}" data-cur="${esc(x.label||'')}" title="Give this device your own name" style="text-decoration:none">✎</a>${sub?`<div class="sub">${esc(sub)}</div>`:''}${x.me?'<span class="badge">this PC</span>':''}${x.gateway?'<span class="badge">router</span>':''}${x.random?'<span class="badge" title="Phones/laptops often use a randomized MAC for privacy">private MAC</span>':''}${x.isNew?'<span class="badge new">NEW</span>':''}`}},
+  {id:'ip',label:'IP',val:x=>ipNum(x.ip),first:'asc',render:x=>esc(x.ip)},
+  {id:'mac',label:'MAC',val:x=>x.mac,first:'asc',render:x=>`<span class="sub">${esc(x.mac)}</span>`},
+  {id:'vendor',label:'Vendor',off:true,val:x=>x.vendor||'',first:'asc',render:x=>esc(x.vendor||'—')},
+  {id:'kind',label:'Type',off:true,val:x=>x.kind||'',first:'asc',render:x=>esc(x.kind||'—')},
+  {id:'status',label:'Status',val:x=>x.online?1:0,render:x=>`<span class="st ${x.online?'on':''}"><i></i>${x.online?'Online':'Last seen '+new Date(x.last_seen*1000).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})}</span>`},
+  {id:'first',label:'First seen',fixed:true,val:x=>x.first_seen,render:x=>`<span class="sub">${new Date(x.first_seen*1000).toLocaleDateString([], {month:'short',day:'numeric'})}</span>`},
+]});
+const connDT=DataTable($('#conn-t'),{key:'conns',sort:'app',dir:1,empty:'No connections',limit:400,tie:(a,b)=>(a.st==='ESTABLISHED'?-1:1)-(b.st==='ESTABLISHED'?-1:1),cols:[
+  {id:'app',label:'App',fixed:true,val:c=>c.proc,first:'asc',render:c=>`<span class="name">${icon(c.proc)}${esc(c.proc)}</span>`},
+  {id:'proto',label:'Proto',val:c=>c.proto,first:'asc',render:c=>`<span class="sub">${c.proto}</span>`},
+  {id:'pid',label:'PID',off:true,val:c=>c.pid,render:c=>c.pid},
+  {id:'local',label:'Local',val:c=>c.l+':'+c.lp,first:'asc',render:c=>`${esc(c.l)}:${c.lp}`},
+  {id:'remote',label:'Remote',val:c=>c.r?c.r+':'+c.rp:'',first:'asc',render:c=>c.r?esc(c.r)+':'+c.rp+(c.host?` <span class="sub">${esc(c.host)}</span>`:'')+(c.scope==='lan'?'<span class="badge">LAN</span>':''):'<span class="sub">—</span>'},
+  {id:'state',label:'State',val:c=>c.st||'',first:'asc',render:c=>`<span class="sub">${esc(c.st||'')}</span>`},
+  {id:'act',label:'',th:'r',td:'r',fixed:true,render:c=>c.pid>4&&!isProtected(c.proc)?`<button class="btn sm danger" data-cpid="${c.pid}" data-cname="${esc(c.proc)}" title="End process ${c.pid} (${esc(c.proc)})">End</button>`:''},
+]});
+let bwMax=1;
+const appDT=DataTable($('#app-t'),{key:'netapps',sort:'bw',dir:-1,empty:'No active connections',limit:40,
+  tie:(a,b)=>b.c-a.c||a.n.localeCompare(b.n),cols:[
+  {id:'app',label:'App',fixed:true,val:a=>a.n,first:'asc',render:a=>`<div class="name" data-cf="${esc(a.n)}">${icon(a.n)}<b>${esc(a.n)}</b></div>`},
+  {id:'bw',label:'Bandwidth',w:'190px',tip:'Download + upload right now',val:a=>a.down+a.up,render:a=>S.bwOk?`<span class="rate ${a.down+a.up>10240?'hot':''}">${fmtBps(a.down+a.up)}</span><div class="bar"><i style="width:${Math.min(100,(a.down+a.up)/bwMax*100)}%;background:var(--accent)"></i></div>`:'<span class="sub">–</span>'},
+  {id:'down',label:'↓ Down',th:'r',td:'r',val:a=>a.down,render:a=>S.bwOk?`<span class="rate">${fmtBps(a.down)}</span>`:'<span class="sub">–</span>'},
+  {id:'up',label:'↑ Up',th:'r',td:'r',val:a=>a.up,render:a=>S.bwOk?`<span class="rate">${fmtBps(a.up)}</span>`:'<span class="sub">–</span>'},
+  {id:'rx',label:'Downloaded',menu:'Downloaded (session)',tip:'Since RamCapper started tracking',th:'r',td:'r',val:a=>a.rx,render:a=>S.bwOk?fmtB(a.rx):'<span class="sub">–</span>'},
+  {id:'tx',label:'Uploaded',menu:'Uploaded (session)',tip:'Since RamCapper started tracking',th:'r',td:'r',val:a=>a.tx,render:a=>S.bwOk?fmtB(a.tx):'<span class="sub">–</span>'},
+  {id:'c',label:'Connections',th:'r',td:'r',val:a=>a.c,render:a=>a.c},
+  {id:'hosts',label:'Remote hosts',th:'r',td:'r',off:true,val:a=>a.hosts,render:a=>a.hosts},
+  {id:'limit',label:'Limit',render:a=>netRulesFor(a.n).map(r=>`<span class="pill ${r.enabled?'':'off'}">${r.mode==='block'?'blocked':'↑ '+fmtRate(r.kbps)}</span>`).join(' ')},
+  {id:'act',label:'Actions',th:'r',td:'r',fixed:true,render:a=>isProtected(a.n)?'':`<button class="btn sm" data-nlimit="${esc(a.n)}">Limit</button> <button class="btn sm" data-nblock="${esc(a.n)}">Block</button> <button class="btn sm danger" data-nkill="${esc(a.n)}">Kill</button>`},
+]});
 function renderConns(){
   const d=S.net;if(!d)return;
   const q=$('#conn-filter').value.trim().toLowerCase(),listen=$('#conn-listen').checked;
   let list=d.conns.filter(c=>listen||c.st!=='LISTEN');
   if(q)list=list.filter(c=>(c.proc+' '+c.l+':'+c.lp+' '+c.r+':'+c.rp+' '+c.host+' '+c.st).toLowerCase().includes(q));
-  list.sort((a,b)=>a.proc.localeCompare(b.proc)||(a.st==='ESTABLISHED'?-1:1));
-  $('#conns').innerHTML=list.slice(0,400).map(c=>`<tr><td><span class="name">${icon(c.proc)}${esc(c.proc)}</span></td><td class="sub">${c.proto}</td>
-    <td>${esc(c.l)}:${c.lp}</td><td>${c.r?esc(c.r)+':'+c.rp+(c.host?` <span class="sub">${esc(c.host)}</span>`:'')+(c.scope==='lan'?'<span class="badge">LAN</span>':''):'<span class="sub">—</span>'}</td>
-    <td class="sub">${esc(c.st||'')}</td><td class="r">${c.pid>4&&!isProtected(c.proc)?`<button class="btn sm danger" data-cpid="${c.pid}" data-cname="${esc(c.proc)}" title="End process ${c.pid} (${esc(c.proc)})">End</button>`:''}</td></tr>`).join('')||'<tr><td colspan="6" class="sub">No connections</td></tr>';
+  connDT.render(list);
   renderNetApps();renderNetRules();
 }
 function netRulesFor(n){return ((S.net&&S.net.netrules)||[]).filter(r=>r.name===n)}
 function renderNetApps(){
   const d=S.net;if(!d)return;
   const by={};
+  const mk=n=>by[n]||(by[n]={n,c:0,hosts:new Set(),down:0,up:0,rx:0,tx:0});
   d.conns.forEach(c=>{if(c.st!=='ESTABLISHED'&&c.proto!=='UDP')return;if(c.proto==='UDP'&&!c.r)return;
-    const a=by[c.proc]||(by[c.proc]={n:c.proc,c:0,hosts:new Set()});a.c++;if(c.r)a.hosts.add(c.r)});
-  const list=Object.values(by).sort((a,b)=>b.c-a.c).slice(0,30);
-  $('#net-apps').innerHTML=list.map(a=>`<tr><td><div class="name" data-cf="${esc(a.n)}">${icon(a.n)}<b>${esc(a.n)}</b></div></td><td class="r">${a.c}</td><td class="r">${a.hosts.size}</td>
-    <td>${netRulesFor(a.n).map(r=>`<span class="pill ${r.enabled?'':'off'}">${r.mode==='block'?'blocked':'↑ '+fmtRate(r.kbps)}</span>`).join(' ')}</td>
-    <td class="r">${isProtected(a.n)?'':`<button class="btn sm" data-nlimit="${esc(a.n)}">Limit</button> <button class="btn sm" data-nblock="${esc(a.n)}">Block</button> <button class="btn sm danger" data-nkill="${esc(a.n)}">Kill</button>`}</td></tr>`).join('')||'<tr><td colspan="5" class="sub">No active connections</td></tr>';
+    const a=mk(c.proc);a.c++;if(c.r)a.hosts.add(c.r)});
+  const bw=d.bw||{available:false,reason:'starting',apps:[]};
+  S.bwOk=bw.available;
+  bw.apps.forEach(b=>{const a=mk(b.name);a.down=b.down;a.up=b.up;a.rx=b.rx;a.tx=b.tx});
+  const list=Object.values(by).filter(a=>a.c>0||a.rx+a.tx>0).map(a=>Object.assign(a,{hosts:a.hosts.size}));
+  bwMax=Math.max(1,...list.map(a=>a.down+a.up));
+  const note=$('#bw-note');
+  if(!bw.available){
+    note.classList.remove('hide');
+    note.innerHTML=bw.reason==='admin'?'Per-app bandwidth needs administrator rights (Windows only lets administrators watch per-process traffic). <a href="#" id="bw-elev">Restart as administrator</a>':
+      bw.reason==='starting'?'Starting the bandwidth monitor…':'Bandwidth monitor could not start: '+esc(bw.reason);
+  }else note.classList.add('hide');
+  appDT.render(list);
   $('#nl-apps').innerHTML=list.map(a=>`<option value="${esc(a.n)}">`).join('');
 }
 function renderNetRules(){
@@ -142,6 +176,7 @@ $('#nl-add').onclick=()=>{
   addNetRule({name,mode,kbps:kbps||8});$('#nl-name').value='';
 };
 $('#nl-elev').onclick=e=>{e.preventDefault();elevate()};
+document.body.addEventListener('click',e=>{if(e.target.id==='bw-elev'){e.preventDefault();elevate()}});
 document.body.addEventListener('click',async e=>{
   const t=e.target.closest('[data-nlimit],[data-nblock],[data-nkill],[data-cpid],[data-nrd],[data-cf]');if(!t)return;const d=t.dataset;
   if(d.cf!==undefined){$('#conn-filter').value=d.cf;renderConns();$('#conn-filter').scrollIntoView({block:'center',behavior:'smooth'});return}
@@ -157,7 +192,7 @@ document.body.addEventListener('change',async e=>{
   pollNet();
 });
 $('#conn-filter').oninput=renderConns;$('#conn-listen').onchange=renderConns;
-$('#devices').onclick=async e=>{
+$('#dev-t').onclick=async e=>{
   const a=e.target.closest('[data-ren]');if(!a)return;e.preventDefault();
   const v=prompt('Name for this device (leave empty to clear):',a.dataset.cur);if(v===null)return;
   await api('/api/net/label',{mac:a.dataset.ren,label:v});pollNet();

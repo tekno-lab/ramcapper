@@ -159,7 +159,7 @@ async function elevate(){
   try{await api('/api/elevate',{});waitForRestart('Restarting as administrator…')}catch(e){toast(e.message)}
 }
 $('#b-admin').onclick=elevate;
-$('#btn-close').onclick=async()=>{try{await api('/api/closing',{})}catch(e){}window.close();setTimeout(()=>toast('This browser tab can’t be closed by the page — close it yourself. (RamCapper keeps running.)'),400)};
+$('#btn-close').onclick=async()=>{let r={};try{r=await api('/api/closing',{})}catch(e){}if(!r.closed){window.close();setTimeout(()=>toast('This browser tab can’t be closed by the page — close it yourself. (RamCapper keeps running.)'),400)}};
 $('#btn-quit').onclick=async()=>{
   if(!confirm('Quit RamCapper completely?\n\nMonitoring, history recording and all limits will stop until you start it again.'))return;
   try{await api('/api/quit',{})}catch(e){}
@@ -178,3 +178,55 @@ function boot(){
   setInterval(loadNow,2000);
   setInterval(loadEvents,5000);loadEvents();
 }
+
+/* ---------------------------------------------------------------- DataTable: sortable columns + show/hide menu (remembered per table) */
+function DataTable(table,o){
+  const key='rc.cols.'+o.key;
+  let st={hidden:null,sort:o.sort||null,dir:o.dir||-1};
+  try{const v=JSON.parse(localStorage.getItem(key)||'null');if(v&&Array.isArray(v.hidden)){st=Object.assign(st,v);if(st.sort&&!o.cols.some(c=>c.id===st.sort&&c.val))st.sort=o.sort||null}}catch(e){}
+  if(!st.hidden)st.hidden=o.cols.filter(c=>c.off).map(c=>c.id);
+  const save=()=>{try{localStorage.setItem(key,JSON.stringify(st))}catch(e){}};
+  const vis=()=>o.cols.filter(c=>c.fixed||!st.hidden.includes(c.id));
+  table.innerHTML='<thead><tr></tr></thead><tbody></tbody>';
+  const tr=table.querySelector('thead tr'),tb=table.querySelector('tbody');
+  const dt={rows:[],
+    head(){
+      const v=vis();
+      tr.innerHTML=v.map((c,i)=>`<th class="${c.th||''}${c.val?' sortable':''}" data-col="${c.id}"${c.w?` style="width:${c.w}"`:''}${c.tip?` title="${esc(c.tip)}"`:''}>${c.label}${st.sort===c.id?`<span class="arr">${st.dir<0?'▼':'▲'}</span>`:''}${i===v.length-1?'<span class="colbtn" title="Show or hide columns">⋮</span>':''}</th>`).join('');
+    },
+    body(){
+      let rows=dt.rows.slice();
+      const c=o.cols.find(x=>x.id===st.sort);
+      if(c&&c.val){const d=st.dir;rows.sort((a,b)=>{const x=c.val(a),y=c.val(b);
+        const r=(typeof x==='string'||typeof y==='string')?String(x).localeCompare(String(y)):(x-y);
+        return r*d||(o.tie?o.tie(a,b):0)})}
+      if(o.limit)rows=rows.slice(0,o.limit);
+      const v=vis();
+      tb.innerHTML=rows.map(r=>`<tr ${o.rowAttr?o.rowAttr(r):''}>${v.map(c=>`<td class="${c.td||''}${c.cls?' '+c.cls(r):''}">${c.render(r)}</td>`).join('')}</tr>`).join('')
+        ||`<tr><td colspan="${v.length}" class="sub">${o.empty||'Nothing to show'}</td></tr>`;
+    },
+    render(rows){dt.rows=rows;dt.body()},
+  };
+  let pop=null;
+  const closePop=()=>{if(pop){pop.remove();pop=null}};
+  tr.addEventListener('click',e=>{
+    const b=e.target.closest('.colbtn');
+    if(b){
+      if(pop){closePop();return}
+      pop=document.createElement('div');pop.className='pop';
+      pop.innerHTML='<h4>Columns</h4>'+o.cols.filter(c=>!c.fixed).map(c=>`<label><input type="checkbox" data-c="${c.id}" ${st.hidden.includes(c.id)?'':'checked'}>${c.menu||c.label}</label>`).join('')+'<a href="#" class="rst">Reset to default</a>';
+      document.body.appendChild(pop);
+      const r=b.getBoundingClientRect();pop.style.top=Math.min(innerHeight-pop.offsetHeight-8,r.bottom+6)+'px';pop.style.left=Math.max(8,Math.min(innerWidth-pop.offsetWidth-8,r.right-pop.offsetWidth))+'px';
+      pop.onchange=ev=>{const id=ev.target.dataset.c;st.hidden=st.hidden.filter(x=>x!==id);if(!ev.target.checked)st.hidden.push(id);save();dt.head();dt.body()};
+      pop.querySelector('.rst').onclick=ev=>{ev.preventDefault();st.hidden=o.cols.filter(c=>c.off).map(c=>c.id);st.sort=o.sort||null;st.dir=o.dir||-1;save();closePop();dt.head();dt.body()};
+      return}
+    const th=e.target.closest('th.sortable');if(!th)return;
+    const id=th.dataset.col;
+    if(st.sort===id)st.dir=-st.dir;else{st.sort=id;const c=o.cols.find(x=>x.id===id);st.dir=c&&c.first==='asc'?1:-1}
+    save();dt.head();dt.body();
+  });
+  document.addEventListener('mousedown',e=>{if(pop&&!pop.contains(e.target)&&!e.target.closest('.colbtn'))closePop()});
+  dt.head();
+  return dt;
+}
+const fmtBps=b=>b>=MB*0.95?(b/MB).toFixed(2)+' MB/s':b>=1024?Math.round(b/1024)+' KB/s':Math.round(b)+' B/s';

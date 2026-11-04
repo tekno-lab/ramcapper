@@ -162,3 +162,20 @@ tr.clk{cursor:pointer}
 .modbar{display:flex;align-items:center;gap:14px;margin-bottom:16px}
 .kv{display:grid;grid-template-columns:auto 1fr;gap:6px 18px;margin-top:12px;font-size:13px}
 .kv span:nth-child(odd){color:var(--muted)}
+
+/* ---- data tables: sortable headers + show/hide columns */
+th.sortable{cursor:pointer;user-select:none}
+th.sortable:hover{color:var(--text)}
+th .arr{margin-left:5px;font-size:9px;color:var(--accent)}
+th .colbtn{display:inline-grid;place-items:center;width:22px;height:22px;margin-left:8px;border-radius:6px;cursor:pointer;color:var(--muted);font-size:15px;line-height:1;vertical-align:middle;letter-spacing:0;text-transform:none}
+th .colbtn:hover{background:var(--panel3);color:var(--text)}
+.pop{position:fixed;z-index:60;background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);padding:8px;min-width:200px;font-size:13px}
+.pop h4{margin:2px 8px 6px;font-size:11px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;color:var(--muted)}
+.pop label{display:flex;align-items:center;gap:9px;padding:6px 8px;border-radius:8px;cursor:pointer}
+.pop label:hover{background:var(--panel2)}
+.pop input{accent-color:var(--accent);margin:0}
+.pop .rst{display:block;margin:6px 8px 2px;font-size:12px}
+.rate{font-variant-numeric:tabular-nums;white-space:nowrap}
+.rate.hot{color:var(--accent);font-weight:600}
+th{white-space:nowrap}
+td.r{white-space:nowrap}
