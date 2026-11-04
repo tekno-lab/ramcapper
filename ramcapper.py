@@ -187,6 +187,11 @@ CREATE TABLE IF NOT EXISTS devices(mac TEXT PRIMARY KEY, ip TEXT, host TEXT, fir
 CREATE INDEX IF NOT EXISTS sys_ts ON sys(ts);
 CREATE INDEX IF NOT EXISTS app_ts ON app(ts);
 """)
+for _col in ("vendor", "kind", "label"):     # devices table grew these columns after v1.0
+    try:
+        wdb.execute(f"ALTER TABLE devices ADD COLUMN {_col} TEXT DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass
 wdb.commit()
 
 
@@ -707,6 +712,8 @@ class Net:
     gateway = ""
     rdns = {}
     pending = set()
+    ident_done = {}
+    force_ident = False
 
 
 from concurrent.futures import ThreadPoolExecutor
@@ -809,6 +816,247 @@ def _gateway():
         return ""
 
 
+# ---- device identification: vendor database, DNS/mDNS/NetBIOS/SSDP lookups and a light port fingerprint
+import gzip
+import random
+import urllib.request
+from urllib.parse import urlparse as _urlparse
+
+_OUI = None
+
+
+def oui_vendor(mac):
+    global _OUI
+    if _OUI is None:
+        try:
+            with gzip.open(os.path.join(HERE, "assets", "oui.json.gz"), "rt", encoding="utf-8") as f:
+                _OUI = json.load(f)
+        except Exception:
+            _OUI = {}
+    return _OUI.get(mac.replace("-", "")[:6].lower(), "")
+
+
+def _read_name(b, o):
+    parts, end, jumped = [], 0, False
+    for _ in range(64):
+        n = b[o]
+        if n == 0:
+            o += 1
+            break
+        if n & 0xC0 == 0xC0:
+            if not jumped:
+                end, jumped = o + 2, True
+            o = ((n & 0x3F) << 8) | b[o + 1]
+            continue
+        parts.append(b[o + 1:o + 1 + n].decode("utf-8", "replace"))
+        o += 1 + n
+    else:
+        raise ValueError("name loop")
+    return ".".join(parts), (end if jumped else o)
+
+
+def _ptr_query(ip, server, port, timeout=1.0, mdns=False):
+    """Reverse-DNS (PTR) lookup of `ip` sent straight to `server`:`port` (a DNS server, or the device itself for mDNS)."""
+    rev = ".".join(reversed(ip.split("."))) + ".in-addr.arpa"
+    qid = 0 if mdns else random.randint(1, 65535)
+    pkt = struct.pack(">HHHHHH", qid, 0 if mdns else 0x0100, 1, 0, 0, 0)
+    pkt += b"".join(bytes([len(p)]) + p.encode() for p in rev.split(".")) + b"\x00"
+    pkt += struct.pack(">HH", 12, 0x8001 if mdns else 1)   # 0x8001 = IN + unicast-response bit
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(timeout)
+    try:
+        s.sendto(pkt, (server, port))
+        resp, _ = s.recvfrom(2048)
+    finally:
+        s.close()
+    qd, an = struct.unpack(">HH", resp[4:8])
+    o = 12
+    for _ in range(qd):
+        _, o = _read_name(resp, o)
+        o += 4
+    for _ in range(an):
+        _, o = _read_name(resp, o)
+        t, _c, _ttl, rl = struct.unpack(">HHIH", resp[o:o + 10])
+        o += 10
+        if t == 12:
+            return _read_name(resp, o)[0]
+        o += rl
+    return ""
+
+
+def _nbstat(ip, timeout=1.0):
+    """NetBIOS name query (UDP 137): answered by Windows PCs, NAS boxes, printers, some Android/Samba devices."""
+    enc = b"".join(bytes([0x41 + (c >> 4), 0x41 + (c & 15)]) for c in b"*" + b"\x00" * 15)
+    pkt = struct.pack(">HHHHHH", random.randint(1, 65535), 0, 1, 0, 0, 0) + b"\x20" + enc + b"\x00" + struct.pack(">HH", 0x21, 1)
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(timeout)
+    try:
+        s.sendto(pkt, (ip, 137))
+        resp, _ = s.recvfrom(2048)
+    finally:
+        s.close()
+    _, o = _read_name(resp, 12)
+    o += 10
+    for i in range(resp[o]):
+        e = resp[o + 1 + i * 18:o + 1 + (i + 1) * 18]
+        if e[15] == 0 and not (e[16] & 0x80):    # unique workstation name
+            return e[:15].decode("ascii", "replace").strip()
+    return ""
+
+
+def _ssdp(my_ip, wait=2.5):
+    """UPnP discovery: smart TVs, consoles, speakers, routers, printers answer with a description URL."""
+    found = {}
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    try:
+        s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+        s.bind((my_ip, 0))
+        s.settimeout(0.4)
+        msg = b'M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: "ssdp:discover"\r\nMX: 2\r\nST: ssdp:all\r\n\r\n'
+        for _ in range(2):
+            s.sendto(msg, ("239.255.255.250", 1900))
+        end = time.time() + wait
+        while time.time() < end:
+            try:
+                data, addr = s.recvfrom(4096)
+            except socket.timeout:
+                continue
+            hdr = {}
+            for line in data.decode("utf-8", "replace").split("\r\n")[1:]:
+                if ":" in line:
+                    k, v = line.split(":", 1)
+                    hdr[k.strip().lower()] = v.strip()
+            d = found.setdefault(addr[0], {})
+            d.setdefault("location", hdr.get("location", ""))
+            d.setdefault("server", hdr.get("server", ""))
+    except OSError:
+        pass
+    finally:
+        s.close()
+    return found
+
+
+def _upnp_info(ip, location):
+    """friendlyName / manufacturer / model from the device's own description XML (only fetched from the device itself)."""
+    try:
+        u = _urlparse(location)
+        if u.scheme != "http" or u.hostname != ip:
+            return {}
+        with urllib.request.urlopen(location, timeout=2) as r:
+            xml = r.read(65536).decode("utf-8", "replace")
+        g = lambda tag: (re.search(rf"<{tag}>([^<]{{1,80}})</{tag}>", xml) or [None, ""])[1].strip()
+        return {"name": g("friendlyName"), "maker": g("manufacturer"), "model": g("modelName")}
+    except Exception:
+        return {}
+
+
+def _http_title(ip):
+    try:
+        with urllib.request.urlopen(f"http://{ip}/", timeout=1.5) as r:
+            html_ = r.read(16384).decode("utf-8", "replace")
+        m = re.search(r"<title[^>]*>([^<]{1,60})</title>", html_, re.I)
+        t = (m.group(1).strip() if m else "")
+        return "" if re.fullmatch(r"(index|home|login|welcome|untitled)?( page)?", t, re.I) else t
+    except Exception:
+        return ""
+
+
+PROBE_PORTS = (22, 80, 443, 445, 3389, 5000, 8008, 8009, 8080, 9100, 515, 554, 62078)
+VENDOR_KINDS = (("apple", "Apple device"), ("samsung", "Samsung device"), ("espressif", "Smart-home / IoT device"),
+                ("raspberry", "Raspberry Pi"), ("amazon", "Amazon device (Echo / Fire)"), ("google", "Google / Nest device"),
+                ("sonos", "Sonos speaker"), ("roku", "Roku streamer"), ("nintendo", "Nintendo console"), ("sony", "Sony device"),
+                ("microsoft", "Microsoft device"), ("xiaomi", "Xiaomi device"), ("huawei", "Huawei device"), ("tp-link", "Network equipment"),
+                ("netgear", "Network equipment"), ("ubiquiti", "Network equipment"), ("zyxel", "Network equipment"), ("d-link", "Network equipment"),
+                ("tuya", "Smart-home / IoT device"), ("meross", "Smart plug / IoT device"), ("ring", "Ring camera / doorbell"),
+                ("high-flying", "IoT Wi-Fi module"), ("icomm", "IoT Wi-Fi module"), ("shelly", "Smart-home / IoT device"),
+                ("wyze", "Wyze camera / IoT"), ("eufy", "Eufy / Anker device"), ("philips", "Philips device (Hue / TV)"), ("hikvision", "IP camera"), ("dahua", "IP camera"), ("lg ", "LG device (TV / phone)"),
+                ("intel", "Computer"), ("realtek", "Computer / network adapter"), ("hewlett", "HP device / printer"), ("canon", "Printer"),
+                ("epson", "Printer"), ("brother", "Printer"), ("vmware", "Virtual machine"))
+
+
+def _guess_kind(ports, vendor, host, ssdp_model, is_gw, is_me, random_mac):
+    v, h = vendor.lower() + " ", host.lower()
+    if is_me:
+        return "This PC"
+    if is_gw:
+        return "Router / gateway"
+    if 62078 in ports or "iphone" in h or "ipad" in h:
+        return "iPhone / iPad"
+    if 8008 in ports or 8009 in ports or "chromecast" in (h + ssdp_model.lower()):
+        return "Chromecast / Google TV"
+    if 9100 in ports or 515 in ports:
+        return "Printer"
+    if 554 in ports:
+        return "IP camera / recorder"
+    for key, label in VENDOR_KINDS:
+        if re.search(r"\b" + re.escape(key.strip()) + r"\b", v):
+            return label
+    if 3389 in ports or 445 in ports:
+        return "Windows PC / file server"
+    if 5000 in ports:
+        return "NAS / media server"
+    if 22 in ports:
+        return "Linux / SSH device"
+    if random_mac:
+        return "Phone / laptop (private MAC)"
+    if {80, 443, 8080} & set(ports):
+        return "Device with a web page"
+    return ""
+
+
+def _clean_host(n):
+    n = (n or "").strip().rstrip(".")
+    if len(n) < 3 or re.fullmatch(r"[\d.]+(\.in-addr\.arpa)?", n):
+        return ""
+    return re.sub(r"\.(local|lan|home|localdomain|fritz\.box|router|internal|gateway)$", "", n, flags=re.I)[:48]
+
+
+def identify(mac, ip, my_ip, gateway, ssdp):
+    """Best-effort name/vendor/kind for one device. Every lookup is optional and bounded by short timeouts."""
+    info = {"host": "", "vendor": oui_vendor(mac), "kind": ""}
+    me = ip == my_ip
+    host, model = "", ""
+    if me:
+        host = socket.gethostname()
+    else:
+        for fn in (lambda: _nbstat(ip),                                             # Windows / Samba / NAS
+                   lambda: _ptr_query(ip, ip, 5353, 1.0, mdns=True),                 # Apple, many Android, Linux (Bonjour/Avahi)
+                   lambda: _ptr_query(ip, gateway, 53, 1.0) if gateway else "",      # router DNS often knows DHCP hostnames
+                   lambda: socket.gethostbyaddr(ip)[0]):                             # system resolver
+            try:
+                host = _clean_host(fn())
+            except Exception:
+                host = ""
+            if host:
+                break
+    ports = []
+    if not me:
+        for p in PROBE_PORTS:
+            s = socket.socket()
+            s.settimeout(0.3)
+            try:
+                if s.connect_ex((ip, p)) == 0:
+                    ports.append(p)
+            except OSError:
+                pass
+            finally:
+                s.close()
+    up = _upnp_info(ip, ssdp[ip]["location"]) if ssdp.get(ip, {}).get("location") else {}
+    model = " ".join(x for x in (up.get("maker"), up.get("model")) if x)
+    if not host and up.get("name"):
+        host = _clean_host(up["name"])
+    title = _http_title(ip) if (not me and 80 in ports) else ""
+    if not info["vendor"] and up.get("maker"):
+        info["vendor"] = up["maker"][:40]
+    info["host"] = host
+    info["kind"] = _guess_kind(ports, info["vendor"], host, model, ip == gateway, me, bool(int(mac[:2], 16) & 2))
+    if model and info["kind"] in ("", "Device with a web page"):
+        info["kind"] = model[:48]
+    elif title and len(title) > 3 and info["kind"] in ("", "Device with a web page"):
+        info["kind"] = ("Web page: " + title)[:48]
+    return info
+
+
 def net_scan():
     """Ping-sweep the local /24, then read the ARP table to list devices on this network."""
     Net.scanning = True
@@ -835,17 +1083,35 @@ def net_scan():
                     found[mac] = ip
         if my_mac:
             found[my_mac] = my_ip
-        with ThreadPoolExecutor(max_workers=16) as ex:
-            names = dict(zip(found.values(), ex.map(lambda ip: socket.gethostname() if ip == my_ip else _name(ip), found.values())))
         now = int(time.time())
         with wlock:
-            known = {r[0] for r in wdb.execute("SELECT mac FROM devices")}
+            old = {r[0]: r[1] for r in wdb.execute("SELECT mac,host FROM devices")}
+        # deep identification (DNS/mDNS/NetBIOS/UPnP/ports) only for new or still-unnamed devices, or on a manual scan
+        due = [m for m in found if Net.force_ident or m not in Net.ident_done or (now - Net.ident_done[m] > 1800 and not old.get(m))]
+        ssdp = _ssdp(my_ip) if due else {}
+
+        def safe_identify(m):
+            try:
+                return identify(m, found[m], my_ip, Net.gateway, ssdp)
+            except Exception:
+                return {"host": "", "vendor": oui_vendor(m), "kind": ""}
+        with ThreadPoolExecutor(max_workers=16) as ex:
+            res = dict(zip(due, ex.map(safe_identify, due)))
+        for m in due:
+            Net.ident_done[m] = now
+        Net.force_ident = False
+        with wlock:
+            known = set(old)
             for mac, ip in found.items():
+                r = res.get(mac) or {"host": "", "vendor": oui_vendor(mac), "kind": ""}
                 if known and mac not in known:
-                    log_event_nolock("net", ip, f"New device on your network: {ip} ({mac}){' ' + names[ip] if names[ip] else ''}")
-                wdb.execute("INSERT INTO devices(mac,ip,host,first_seen,last_seen) VALUES(?,?,?,?,?) "
-                            "ON CONFLICT(mac) DO UPDATE SET ip=excluded.ip, host=CASE WHEN excluded.host!='' THEN excluded.host ELSE host END, last_seen=excluded.last_seen",
-                            (mac, ip, names[ip], now, now))
+                    log_event_nolock("net", ip, f"New device on your network: {ip} ({mac}) {r['host'] or r['vendor'] or ''}".rstrip())
+                wdb.execute("INSERT INTO devices(mac,ip,host,vendor,kind,first_seen,last_seen) VALUES(?,?,?,?,?,?,?) "
+                            "ON CONFLICT(mac) DO UPDATE SET ip=excluded.ip, last_seen=excluded.last_seen, "
+                            "host=CASE WHEN excluded.host!='' THEN excluded.host ELSE host END, "
+                            "vendor=CASE WHEN excluded.vendor!='' THEN excluded.vendor ELSE vendor END, "
+                            "kind=CASE WHEN excluded.kind!='' THEN excluded.kind ELSE kind END",
+                            (mac, ip, r["host"], r["vendor"], r["kind"], now, now))
             wdb.commit()
         Net.online = set(found)
         Net.scan_finished = time.time()
@@ -868,7 +1134,7 @@ def log_event_nolock(kind, app, detail):
 
 def net_devices():
     db = rdb()
-    rows = [dict(r) for r in db.execute("SELECT mac,ip,host,first_seen,last_seen FROM devices")]
+    rows = [dict(r) for r in db.execute("SELECT mac,ip,host,vendor,kind,label,first_seen,last_seen FROM devices")]
     db.close()
     for r in rows:
         r["online"] = r["mac"] in Net.online
@@ -1142,7 +1408,16 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(409, {"error": "network module is off"})
                 if not Net.scanning:
                     Net.last_scan = time.time()
+                    Net.force_ident = True      # a manual scan re-identifies every device
                     threading.Thread(target=net_scan, daemon=True).start()
+                return self._send(200, {})
+            if path == "/api/net/label":
+                mac = str(body.get("mac", "")).lower()
+                if not re.fullmatch(r"[0-9a-f]{2}(-[0-9a-f]{2}){5}", mac):
+                    return self._send(400, {"error": "bad MAC"})
+                with wlock:
+                    wdb.execute("UPDATE devices SET label=? WHERE mac=?", (str(body.get("label", "")).strip()[:60], mac))
+                    wdb.commit()
                 return self._send(200, {})
             if path == "/api/storage/scan":
                 if not module_on("storage"):

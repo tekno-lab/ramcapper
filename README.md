@@ -23,7 +23,7 @@
   | **Hard cap** | Windows enforces a working-set ceiling per process (limit ÷ process count). The app pages instead of growing; no crash. |
   | **Terminate** | Ends the app after it stays over its limit for N checks (2 s each). |
 - **Emergency auto-trim** – trims every reachable process when system RAM crosses a threshold you choose.
-- **Network tab** *(opt-in)* – live connections per app, throughput chart, and a scan of devices on your local subnet with new-device alerts.
+- **Network tab** *(opt-in)* – live connections per app, throughput chart, and a scan of devices on your local subnet with new-device alerts. Devices are identified by hostname (NetBIOS, mDNS, router DNS), UPnP description, a MAC-vendor database and a light port fingerprint (router, printer, Chromecast, IoT…). Click ✎ to give any device your own name.
 - **Storage tab** *(opt-in)* – scan a drive or folder to see what takes the most space: drill-down folders, largest files, breakdown by file type. Read-only.
 - **Portable** – single `.exe`, no installer. History and settings live in a folder you choose.
 - **Safe by design** – clipboard owners are never trimmed, critical Windows processes can't be ended, and the web UI only listens on `127.0.0.1`.
@@ -65,10 +65,10 @@ This installs the dependencies and runs PyInstaller. The result is **`dist\RamCa
 pip install -r requirements.txt pyinstaller
 python -m PyInstaller --noconfirm --clean --onefile --noconsole ^
     --icon assets\ramcapper.ico --name RamCapper ^
-    --add-data "index.html;." ramcapper.py
+    --add-data "index.html;." --add-data "assets\oui.json.gz;assets" ramcapper.py
 ```
 
-Flag notes: `--onefile` produces the portable exe, `--noconsole` hides the console window, `--add-data "index.html;."` bundles the UI next to the code (Windows uses `;` as the separator).
+Flag notes: `--onefile` produces the portable exe, `--noconsole` hides the console window, `--add-data` bundles the UI and the MAC-vendor database next to the code (Windows uses `;` as the separator).
 
 ### Troubleshooting the build
 
@@ -130,8 +130,8 @@ You can also restart as administrator and move the data folder from the **Settin
 ```
 ramcapper.py      backend: sampler, limiter, network/storage modules, HTTP server
 index.html        dashboard (single file, no external dependencies)
-assets/           icon source (SVG), .ico and .png
-tools/            helper scripts (icon generation)
+assets/           icon source (SVG), .ico and .png, MAC-vendor database (oui.json.gz)
+tools/            helper scripts (icon generation, make_oui.py to refresh the vendor database from the IEEE registry)
 build.bat         one-command PyInstaller build
 run*.bat kill.bat launchers for the source version
 ```

@@ -643,7 +643,9 @@ async function pollNet(){
     const oldest=Math.min(...d.devices.map(x=>x.first_seen)),nowS=Date.now()/1000;
     $('#devices').innerHTML=d.devices.map(x=>{
       const isNew=x.first_seen-oldest>600&&nowS-x.first_seen<86400;
-      return `<tr><td><b>${esc(x.host||'Unknown device')}</b>${x.me?'<span class="badge">this PC</span>':''}${x.gateway?'<span class="badge">router</span>':''}${x.random?'<span class="badge" title="Phones/laptops often use a randomized MAC for privacy">private MAC</span>':''}${isNew?'<span class="badge new">NEW</span>':''}</td>
+      const nm=x.label||x.host||(x.vendor?x.vendor+' device':'Unknown device');
+      const sub=[x.kind,x.vendor&&!nm.startsWith(x.vendor)?x.vendor:''].filter(Boolean).join(' · ');
+      return `<tr><td><b>${esc(nm)}</b> <a href="#" class="sub" data-ren="${esc(x.mac)}" data-cur="${esc(x.label||'')}" title="Give this device your own name" style="text-decoration:none">✎</a>${sub?`<div class="sub">${esc(sub)}</div>`:''}${x.me?'<span class="badge">this PC</span>':''}${x.gateway?'<span class="badge">router</span>':''}${x.random?'<span class="badge" title="Phones/laptops often use a randomized MAC for privacy">private MAC</span>':''}${isNew?'<span class="badge new">NEW</span>':''}</td>
       <td>${esc(x.ip)}</td><td class="sub">${esc(x.mac)}</td>
       <td><span class="st ${x.online?'on':''}"><i></i>${x.online?'Online':'Last seen '+new Date(x.last_seen*1000).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})}</span></td>
       <td class="sub">${new Date(x.first_seen*1000).toLocaleDateString([], {month:'short',day:'numeric'})}</td></tr>`}).join('')||`<tr><td colspan="5" class="sub">${d.scanning?'Scanning your network…':'No devices found yet.'}</td></tr>`;
@@ -664,6 +666,11 @@ function renderConns(){
 }
 $('#conn-filter').oninput=renderConns;$('#conn-listen').onchange=renderConns;
 $('#conn-apps').onclick=e=>{const n=e.target.closest('.lg')?.dataset.cf;if(n){$('#conn-filter').value=n;renderConns()}};
+$('#devices').onclick=async e=>{
+  const a=e.target.closest('[data-ren]');if(!a)return;e.preventDefault();
+  const v=prompt('Name for this device (leave empty to clear):',a.dataset.cur);if(v===null)return;
+  await api('/api/net/label',{mac:a.dataset.ren,label:v});pollNet();
+};
 $('#dev-scan').onclick=async()=>{await api('/api/net/scan',{});toast('Scanning your network…');pollNet()};
 
 /* ---- storage */
