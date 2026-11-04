@@ -625,6 +625,7 @@ def icon_png(name):
 
 SELF = psutil.Process()
 SELF.cpu_percent(None)
+SELF_NAME = SELF.name().lower()
 NCPU = psutil.cpu_count() or 1
 
 
@@ -666,7 +667,8 @@ def now_payload():
             vals = [v for _, v in dq[-60:]]
             step = max(1, len(vals) // 30)
             out.append({"name": a["name"], "rss": a["rss"], "private": a["private"], "procs": len(a["pids"]),
-                        "d5": a["rss"] - past, "spark": vals[::step]})
+                        "d5": a["rss"] - past, "spark": vals[::step],
+                        "protected": a["name"] in PROTECTED or a["name"] == SELF_NAME})
     with cfg_lock:
         rules = list(CFG["rules"])
     return {"sys": s, "apps": out, "admin": ADMIN, "self": self_usage(), "ts": time.time(), "capped": len(ST.capped), "rules": rules}
@@ -1199,7 +1201,7 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     name = body["name"].lower()
                     pids = [p.pid for p in psutil.process_iter(["name"]) if (p.info["name"] or "").lower() == name]
-                if name in PROTECTED:
+                if name in PROTECTED or name == SELF_NAME:
                     return self._send(400, {"error": "protected process"})
                 n_killed = kill_procs(pids)
                 log_event("kill", name, f"Manually ended {n_killed} process(es)")

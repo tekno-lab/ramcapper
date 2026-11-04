@@ -427,7 +427,7 @@ function renderApps(){
       <td class="r ${cls}">${fmtD(d)}</td>
       <td><svg width="84" height="24"><polyline points="${pts}" fill="none" stroke="${c}" stroke-width="1.6" stroke-linejoin="round"/></svg></td>
       <td>${pills}</td>
-      <td class="r"><button class="btn sm" data-trim="${esc(a.name)}">Trim</button> <button class="btn sm" data-limit="${esc(a.name)}">Limit</button></td></tr>`}).join('')||'<tr><td colspan="6" class="sub">No matching apps</td></tr>';
+      <td class="r"><button class="btn sm" data-trim="${esc(a.name)}">Trim</button> <button class="btn sm" data-limit="${esc(a.name)}">Limit</button>${a.protected?'':` <button class="btn sm danger" data-kill="${esc(a.name)}" data-procs="${a.procs}" title="End all ${a.procs} process(es) of ${esc(a.name)}">Kill</button>`}</td></tr>`}).join('')||'<tr><td colspan="6" class="sub">No matching apps</td></tr>';
 }
 const icon=n=>`<img class="ico" loading="lazy" src="/api/icon?name=${encodeURIComponent(n)}" alt="" onerror="this.style.visibility='hidden'">`;
 /* searchable app picker */
@@ -522,8 +522,12 @@ $('#legend').onclick=e=>{const n=e.target.closest('.lg')?.dataset.n;if(!n)return
 $('#search').oninput=renderApps;
 $('#optimize').onclick=async()=>{const b=$('#optimize');b.disabled=true;try{const r=await api('/api/trim',{});toast(`Trimmed ${r.ok} processes · freed ~${fmtB(r.freed)}${r.failed?` · ${r.failed} not accessible`:''}`)}catch(e){toast('Failed: '+e.message)}b.disabled=false;loadNow();loadEvents()};
 document.body.addEventListener('click',async e=>{
-  const t=e.target.closest('[data-open],[data-trim],[data-limit],[data-go],[data-rd],[data-tp],[data-kp]');if(!t)return;
+  const t=e.target.closest('[data-open],[data-trim],[data-limit],[data-go],[data-rd],[data-tp],[data-kp],[data-kill]');if(!t)return;
   const d=t.dataset;
+  if(d.kill!==undefined){
+    if(!confirm(`Kill ${d.kill}?\n\nThis ends all ${d.procs} process(es) of this app immediately. Unsaved work in it will be lost.`))return;
+    try{const r=await api('/api/kill',{name:d.kill});toast(`${d.kill}: ended ${r.killed} process(es)`)}catch(x){toast('Could not kill: '+x.message)}
+    loadNow();loadEvents();return}
   if(d.open){S.open=d.open;S.dhist=null;$('#drawer').classList.add('open');renderDrawer();loadNow();loadHist()}
   else if(d.trim!==undefined){const r=await api('/api/trim',{name:d.trim});toast(`${d.trim}: freed ~${fmtB(r.freed)}${r.failed?` (${r.failed} not accessible)`:''}`);loadNow()}
   else if(d.limit!==undefined){showTab('limiter');$('#f-name').value=d.limit;$('#f-lim').focus();window.scrollTo({top:document.body.scrollHeight,behavior:'smooth'})}
