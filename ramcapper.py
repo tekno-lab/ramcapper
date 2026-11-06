@@ -34,7 +34,7 @@ except Exception:
     except Exception:
         pass
 
-VERSION = "1.8.0"
+VERSION = "1.8.1"
 FROZEN = getattr(sys, "frozen", False)
 HERE = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))   # bundled resources
 APP_DIR = os.path.dirname(sys.executable) if FROZEN else os.path.dirname(os.path.abspath(__file__))
@@ -1611,6 +1611,10 @@ SERVER = {}
 def quit_app():
     """Release hard caps, flush the DB and exit the whole process."""
     try:
+        close_ui_window()                      # the dashboard window goes away with the app
+    except Exception:
+        pass
+    try:
         tray_remove()
         bw_stop()
         release_caps()
@@ -1896,7 +1900,7 @@ class Handler(BaseHTTPRequestHandler):
                 restart_into(lambda: relaunch_normal(["--takeover", "--no-open"], keep_data=False))
                 return
             if path == "/api/quit":
-                self._send(200, {"bye": True})
+                self._send(200, {"bye": True, "closed": bool(find_ui_windows())})     # quit_app closes the app window itself
                 threading.Timer(0.4, quit_app).start()
                 return
             if path == "/api/reveal":

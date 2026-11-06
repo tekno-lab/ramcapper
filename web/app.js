@@ -163,9 +163,10 @@ $('#b-admin').onclick=elevate;
 $('#btn-close').onclick=async()=>{let r={};try{r=await api('/api/closing',{})}catch(e){}if(!r.closed){window.close();setTimeout(()=>toast('This browser tab can’t be closed by the page — close it yourself. (RamCapper keeps running.)'),400)}};
 $('#btn-quit').onclick=async()=>{
   if(!confirm('Quit RamCapper completely?\n\nMonitoring, history recording and all limits will stop until you start it again.'))return;
-  try{await api('/api/quit',{})}catch(e){}
-  document.body.innerHTML='<div style="display:grid;place-content:center;height:100vh;width:100%;text-align:center;font:16px Segoe UI;color:#8b98a9"><b style="font-size:20px;color:#e6edf3">RamCapper has quit</b><br>You can close this window.</div>';
-  setTimeout(()=>window.close(),600);
+  let r={};try{r=await api('/api/quit',{})}catch(e){}
+  if(r.closed)return;                          // the app window is closed by RamCapper itself
+  window.close();                              // a normal browser tab: try, and leave a note if the browser refuses
+  setTimeout(()=>{document.body.innerHTML='<div style="display:grid;place-content:center;height:100vh;width:100%;text-align:center;font:16px Segoe UI;color:#8b98a9"><b style="font-size:20px;color:#e6edf3">RamCapper has quit</b><br>You can close this tab.</div>'},400);
 };
 /* opt-in module switches (Network / Storage pages) */
 document.body.addEventListener('change',async e=>{

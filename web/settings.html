@@ -19,7 +19,11 @@
       <label class="row sub" style="gap:8px"><input type="checkbox" id="inst-desktop" checked> Desktop shortcut</label>
       <label class="row sub" style="gap:8px"><input type="checkbox" id="inst-startup" checked> Start with Windows</label>
     </div>
-    <div class="row" style="margin-top:14px;gap:10px;flex-wrap:wrap">
+    <div class="row" style="margin-top:14px;gap:12px;flex-wrap:wrap" id="inst-admin-row">
+      <button class="btn" id="inst-admin">Run as administrator</button>
+      <span class="sub" id="inst-admin-sub">Restart RamCapper with administrator rights (Windows asks for permission).</span>
+    </div>
+    <div class="row" style="margin-top:12px;gap:10px;flex-wrap:wrap">
       <button class="btn primary" id="inst-go">Install to Program Files…</button>
       <button class="btn danger hide" id="inst-un">Uninstall…</button>
     </div>
@@ -80,6 +84,8 @@ function showInstall(n){
   else{sub.textContent='You are running the portable version. Install it to Program Files for a Start menu entry, optional auto-start and an uninstaller. The portable file keeps working either way.';go.textContent='Install to Program Files…'}
 }
 window.onInfo=i=>{
+  $('#inst-admin').classList.toggle('hide',i.admin);
+  $('#inst-admin-sub').innerHTML=i.admin?'<span class="st on"><i></i>Running as administrator</span>':'Restart RamCapper with administrator rights (Windows asks for permission).';
   showInstall(i.install);
   if(document.activeElement!==$('#mb-mode'))$('#mb-mode').value=i.minibar||'minimized';
   if(document.activeElement!==$('#mb-side'))$('#mb-side').value=i.notch_side||'bottom';
@@ -92,7 +98,7 @@ window.onInfo=i=>{
   $('#about').innerHTML=[['Version',i.version],['Mode',i.frozen?'Portable executable':'Running from source'],['Local address','http://127.0.0.1:'+i.port],['Program folder',i.app_dir]]
     .map(([k,v])=>`<span>${k}</span><span style="word-break:break-all">${esc(v)}</span>`).join('');
 };
-$('#i-elev').onclick=elevate;
+$('#i-elev').onclick=elevate;$('#inst-admin').onclick=elevate;
 $('#inst-go').onclick=async()=>{
   const n=S.info.install;
   if(!confirm((n.installed?'Update the installed copy at ':'Install RamCapper to ')+n.dir+'?\n\nWindows will ask for permission. RamCapper restarts from the installed copy and your history is kept.'))return;
