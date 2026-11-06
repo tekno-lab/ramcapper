@@ -2229,11 +2229,15 @@ def start_tray(first_balloon):
 
 
 # ---------------------------------------------------------------- mini stats bar
-# A small always-on-top "pill" at the top centre of the screen with one line of live stats. By default it appears while the
-# dashboard window is minimized. Click it to bring the dashboard back; right-click for a menu.
+# A "notch" that hangs from the top edge of the screen (top-centre) with one line of live stats. By default it slides down while
+# the dashboard window is minimized. Click it to bring the dashboard back; right-click for a menu.
+# Drawn with GDI+ into a per-pixel-alpha layered window, so every curve is anti-aliased.
 PILL_MODES = ("off", "minimized", "hidden", "always")
-PILL = {"hwnd": None, "flash": ("", 0.0), "preview": 0.0, "hist": deque(maxlen=60), "tick": 0, "size": (0, 0), "shown": False}
+PILL = {"hwnd": None, "flash": ("", 0.0), "preview": 0.0, "hist": deque(maxlen=60), "tick": 0, "shown": False, "anim": None,
+        "frame": None}
 gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+MB_ = 1048576
+GB_ = 1073741824
 
 
 def pill_mode():
@@ -2242,31 +2246,30 @@ def pill_mode():
 
 
 def pill_flash(text):
-    """Show a short message in the bar for a few seconds (limiter actions)."""
+    """Show a short message in the notch for a few seconds (limiter actions)."""
     PILL["flash"] = (text[:64], time.time() + 6)
 
 
-def _rgb(r, g, b):
-    return r | (g << 8) | (b << 16)
+def _argb(r, g, b, a=255):
+    return (a << 24) | (r << 16) | (g << 8) | b
 
 
-PILL_COL = {"bg": _rgb(15, 20, 28), "text": _rgb(232, 238, 246), "muted": _rgb(135, 148, 167), "ok": _rgb(52, 195, 143),
-            "warn": _rgb(242, 180, 65), "bad": _rgb(239, 106, 100), "accent": _rgb(91, 140, 255), "line": _rgb(48, 60, 78)}
+PILL_COL = {"bg": _argb(9, 11, 16), "text": _argb(232, 238, 246), "muted": _argb(135, 148, 167), "ok": _argb(52, 195, 143),
+            "warn": _argb(242, 180, 65), "bad": _argb(239, 106, 100), "accent": _argb(110, 160, 255), "line": _argb(60, 72, 92)}
 
 
 def _pill_fmt_rate(b):
-    return f"{b / 1048576:.1f} MB/s" if b >= 1048576 * 0.95 else (f"{b / 1024:.0f} KB/s" if b >= 1024 else f"{b:.0f} B/s")
+    return f"{b / MB_:.1f} MB/s" if b >= MB_ * 0.95 else (f"{b / 1024:.0f} KB/s" if b >= 1024 else f"{b:.0f} B/s")
 
 
 def _pill_app_color(name):
-    h = sum(ord(c) * (i + 3) for i, c in enumerate(name)) % 360
     import colorsys
-    r, g, b = colorsys.hsv_to_rgb(h / 360, 0.55, 0.95)
-    return _rgb(int(r * 255), int(g * 255), int(b * 255))
+    r, g, b = colorsys.hsv_to_rgb((sum(ord(c) * (i + 3) for i, c in enumerate(name)) % 360) / 360, 0.55, 0.95)
+    return _argb(int(r * 255), int(g * 255), int(b * 255))
 
 
 def _pill_items():
-    """The content of the bar as a list of items, or None while there is no data yet."""
+    """The content of the notch as a list of items, or None while there is no data yet."""
     with ST.lock:
         s = dict(ST.sysinfo)
         apps = list(ST.apps.values())
@@ -2278,9 +2281,9 @@ def _pill_items():
     limit = g.get("threshold", 90) if g.get("enabled") else 90
     level = "bad" if pct >= limit else ("warn" if pct >= 70 else "ok")
     cpu = psutil.cpu_percent(None)
-    items = [("dot", level), ("text", f"{pct:.0f}%", "text", True),
+    items = [("dot", PILL_COL[level]), ("text", f"{pct:.0f}%", "text", True),
              ("text", f"{s['used'] / GB_:.1f} / {s['total'] / GB_:.1f} GB", "muted", False),
-             ("spark", level), ("sep",), ("text", "CPU ", "muted", False), ("text", f"{cpu:.0f}%", "text", True)]
+             ("spark", PILL_COL[level]), ("sep",), ("text", "CPU ", "muted", False), ("text", f"{cpu:.0f}%", "text", True)]
     if module_on("network") and Net.rate:
         _, d, u = Net.rate[-1]
         items += [("sep",), ("text", "↓ ", "accent", True), ("text", _pill_fmt_rate(d), "text", False),
@@ -2291,42 +2294,74 @@ def _pill_items():
         items.append(("text", "⚡ " + txt, "accent", True))
     elif apps:
         top = max(apps, key=lambda a: a["rss"])
-        items += [("rawdot", _pill_app_color(top["name"])), ("text", top["name"], "text", False),
+        items += [("dot", _pill_app_color(top["name"])), ("text", top["name"], "text", False),
                   ("text", f"  {top['rss'] / GB_:.1f} GB" if top["rss"] >= GB_ else f"  {top['rss'] / MB_:.0f} MB", "muted", False)]
     return items, level, pct >= limit
 
 
-MB_ = 1048576
-GB_ = 1073741824
+class _GpRectF(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_float), ("y", ctypes.c_float), ("w", ctypes.c_float), ("h", ctypes.c_float)]
+
+
+class _GpPointF(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_float), ("y", ctypes.c_float)]
+
+
+class _BMIH(ctypes.Structure):
+    _fields_ = [("biSize", wintypes.DWORD), ("biWidth", wintypes.LONG), ("biHeight", wintypes.LONG), ("biPlanes", wintypes.WORD),
+                ("biBitCount", wintypes.WORD), ("biCompression", wintypes.DWORD), ("biSizeImage", wintypes.DWORD),
+                ("biXPelsPerMeter", wintypes.LONG), ("biYPelsPerMeter", wintypes.LONG), ("biClrUsed", wintypes.DWORD),
+                ("biClrImportant", wintypes.DWORD)]
+
+
+class _BLEND(ctypes.Structure):
+    _fields_ = [("op", ctypes.c_ubyte), ("flags", ctypes.c_ubyte), ("alpha", ctypes.c_ubyte), ("fmt", ctypes.c_ubyte)]
 
 
 def _pill_thread():
-    I, VPp = ctypes.c_int, VP
+    PV, I, F, U = ctypes.c_void_p, ctypes.c_int, ctypes.c_float, ctypes.c_uint32
+    PP = ctypes.POINTER
+    gp = ctypes.WinDLL("gdiplus")
+    for n, args in {
+        "GdipCreateFromHDC": [PV, PP(PV)], "GdipGetImageGraphicsContext": [PV, PP(PV)],
+        "GdipCreateBitmapFromScan0": [I, I, I, I, PV, PP(PV)], "GdipDisposeImage": [PV], "GdipDeleteGraphics": [PV],
+        "GdipSetSmoothingMode": [PV, I], "GdipSetTextRenderingHint": [PV, I], "GdipSetPixelOffsetMode": [PV, I],
+        "GdipGraphicsClear": [PV, U], "GdipCreatePath": [I, PP(PV)], "GdipDeletePath": [PV],
+        "GdipAddPathArc": [PV, F, F, F, F, F, F], "GdipAddPathLine": [PV, F, F, F, F],
+        "GdipCreateSolidFill": [U, PP(PV)], "GdipDeleteBrush": [PV], "GdipCreatePen1": [U, F, I, PP(PV)], "GdipDeletePen": [PV],
+        "GdipSetPenLineCap197819": [PV, I, I, I], "GdipSetPenLineJoin": [PV, I],
+        "GdipFillPath": [PV, PV, PV], "GdipDrawPath": [PV, PV, PV], "GdipFillEllipse": [PV, PV, F, F, F, F],
+        "GdipDrawLine": [PV, PV, F, F, F, F], "GdipDrawCurve": [PV, PV, PV, I],
+        "GdipCreateFontFamilyFromName": [wintypes.LPCWSTR, PV, PP(PV)], "GdipCreateFont": [PV, F, I, I, PP(PV)],
+        "GdipStringFormatGetGenericTypographic": [PP(PV)], "GdipCloneStringFormat": [PV, PP(PV)],
+        "GdipSetStringFormatFlags": [PV, I], "GdipSetStringFormatLineAlign": [PV, I],
+        "GdipMeasureString": [PV, wintypes.LPCWSTR, I, PV, PV, PV, PV, PV, PV],
+        "GdipDrawString": [PV, wintypes.LPCWSTR, I, PV, PV, PV, PV],
+    }.items():
+        f = getattr(gp, n)
+        f.argtypes, f.restype = args, I
+    tok = ctypes.c_size_t(0)
+    si = (ctypes.c_uint32 * 8)(1, 0, 0, 0, 0, 0, 0, 0)
+    gp.GdiplusStartup.argtypes = [PP(ctypes.c_size_t), PV, PV]
+    gp.GdiplusStartup(ctypes.byref(tok), si, None)
+
     for n, res, args in [
-        ("CreateCompatibleDC", VPp, [VPp]), ("CreateCompatibleBitmap", VPp, [VPp, I, I]), ("SelectObject", VPp, [VPp, VPp]),
-        ("DeleteObject", wintypes.BOOL, [VPp]), ("DeleteDC", wintypes.BOOL, [VPp]), ("CreateSolidBrush", VPp, [wintypes.COLORREF]),
-        ("CreatePen", VPp, [I, I, wintypes.COLORREF]), ("RoundRect", wintypes.BOOL, [VPp, I, I, I, I, I, I]),
-        ("Ellipse", wintypes.BOOL, [VPp, I, I, I, I]), ("SetTextColor", wintypes.COLORREF, [VPp, wintypes.COLORREF]),
-        ("SetBkMode", I, [VPp, I]), ("TextOutW", wintypes.BOOL, [VPp, I, I, wintypes.LPCWSTR, I]),
-        ("GetTextExtentPoint32W", wintypes.BOOL, [VPp, wintypes.LPCWSTR, I, ctypes.POINTER(wintypes.SIZE)]),
-        ("BitBlt", wintypes.BOOL, [VPp, I, I, I, I, VPp, I, I, wintypes.DWORD]),
-        ("Polyline", wintypes.BOOL, [VPp, ctypes.POINTER(wintypes.POINT), I]),
-        ("CreateRoundRectRgn", VPp, [I, I, I, I, I, I]),
-        ("CreateFontW", VPp, [I, I, I, I, I] + [wintypes.DWORD] * 8 + [wintypes.LPCWSTR]),
+        ("CreateCompatibleDC", PV, [PV]), ("SelectObject", PV, [PV, PV]), ("DeleteObject", wintypes.BOOL, [PV]),
+        ("CreateDIBSection", PV, [PV, PV, wintypes.UINT, PP(PV), PV, wintypes.DWORD]),
     ]:
         f = getattr(gdi32, n)
         f.restype, f.argtypes = res, args
     for n, res, args in [
-        ("GetDC", VPp, [VPp]), ("ReleaseDC", I, [VPp, VPp]), ("BeginPaint", VPp, [wintypes.HWND, VPp]), ("EndPaint", wintypes.BOOL, [wintypes.HWND, VPp]),
-        ("InvalidateRect", wintypes.BOOL, [wintypes.HWND, VPp, wintypes.BOOL]), ("ShowWindow", wintypes.BOOL, [wintypes.HWND, I]),
-        ("SetWindowPos", wintypes.BOOL, [wintypes.HWND, VPp, I, I, I, I, wintypes.UINT]),
-        ("SetWindowRgn", I, [wintypes.HWND, VPp, wintypes.BOOL]), ("SetLayeredWindowAttributes", wintypes.BOOL, [wintypes.HWND, wintypes.COLORREF, ctypes.c_ubyte, wintypes.DWORD]),
-        ("SetTimer", VPp, [wintypes.HWND, VPp, wintypes.UINT, VPp]), ("SystemParametersInfoW", wintypes.BOOL, [wintypes.UINT, wintypes.UINT, VPp, wintypes.UINT]),
+        ("GetDC", PV, [PV]), ("ReleaseDC", I, [PV, PV]), ("ShowWindow", wintypes.BOOL, [wintypes.HWND, I]),
+        ("SetWindowPos", wintypes.BOOL, [wintypes.HWND, PV, I, I, I, I, wintypes.UINT]),
+        ("UpdateLayeredWindow", wintypes.BOOL, [wintypes.HWND, PV, PP(wintypes.POINT), PP(wintypes.SIZE), PV, PP(wintypes.POINT),
+                                                wintypes.COLORREF, PP(_BLEND), wintypes.DWORD]),
+        ("SetTimer", PV, [wintypes.HWND, PV, wintypes.UINT, PV]), ("KillTimer", wintypes.BOOL, [wintypes.HWND, PV]),
         ("IsIconic", wintypes.BOOL, [wintypes.HWND]), ("SetForegroundWindow", wintypes.BOOL, [wintypes.HWND]),
         ("DefWindowProcW", LRESULT, [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]),
-        ("CreateWindowExW", wintypes.HWND, [wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD, I, I, I, I, wintypes.HWND, VPp, VPp, VPp]),
-        ("CreatePopupMenu", VPp, []), ("AppendMenuW", wintypes.BOOL, [VPp, wintypes.UINT, VPp, wintypes.LPCWSTR]),
-        ("TrackPopupMenu", wintypes.BOOL, [VPp, wintypes.UINT, I, I, I, wintypes.HWND, VPp]), ("DestroyMenu", wintypes.BOOL, [VPp]),
+        ("CreateWindowExW", wintypes.HWND, [wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD, I, I, I, I, wintypes.HWND, PV, PV, PV]),
+        ("CreatePopupMenu", PV, []), ("AppendMenuW", wintypes.BOOL, [PV, wintypes.UINT, PV, wintypes.LPCWSTR]),
+        ("TrackPopupMenu", wintypes.BOOL, [PV, wintypes.UINT, I, I, I, wintypes.HWND, PV]), ("DestroyMenu", wintypes.BOOL, [PV]),
         ("PostMessageW", wintypes.BOOL, [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]),
     ]:
         f = getattr(user32, n)
@@ -2339,99 +2374,144 @@ def _pill_thread():
 
     scr = user32.GetDC(None)
     mdc = gdi32.CreateCompatibleDC(scr)
+    scratch = PV()
+    gp.GdipCreateFromHDC(scr, ctypes.byref(scratch))           # only used to measure text
+    fam = PV()
+    gp.GdipCreateFontFamilyFromName("Segoe UI", None, ctypes.byref(fam))
+    if not fam:
+        gp.GdipCreateFontFamilyFromName("Arial", None, ctypes.byref(fam))
     fonts = {}
-    for key, w in (("reg", 400), ("bold", 700)):
-        fonts[key] = gdi32.CreateFontW(-S_(13), 0, 0, 0, w, 0, 0, 0, 1, 0, 0, 5, 0, "Segoe UI")
-    state = {"bmp": None, "hover": False}
+    for key, style in (("reg", 0), ("bold", 1)):
+        fp = PV()
+        gp.GdipCreateFont(fam, F(13.0 * scale), style, 2, ctypes.byref(fp))
+        fonts[key] = fp
+    fmt = PV()
+    gp.GdipStringFormatGetGenericTypographic(ctypes.byref(fmt))
+    fmt2 = PV()
+    gp.GdipCloneStringFormat(fmt, ctypes.byref(fmt2))
+    gp.GdipSetStringFormatFlags(fmt2, 0x1000 | 0x0800)          # no wrap, measure trailing spaces
+    gp.GdipSetStringFormatLineAlign(fmt2, 1)                    # centre vertically in the layout box
 
     def measure(text, bold):
-        gdi32.SelectObject(mdc, fonts["bold" if bold else "reg"])
-        sz = wintypes.SIZE()
-        gdi32.GetTextExtentPoint32W(mdc, text, len(text), ctypes.byref(sz))
-        return sz.cx, sz.cy
+        r_in, r_out = _GpRectF(0, 0, 4000, 100), _GpRectF()
+        gp.GdipMeasureString(scratch, text, len(text), fonts["bold" if bold else "reg"], ctypes.byref(r_in), fmt2, ctypes.byref(r_out), None, None)
+        return int(r_out.w + 0.999)
 
-    def render(hwnd):
+    def brush(col):
+        b = PV()
+        gp.GdipCreateSolidFill(col, ctypes.byref(b))
+        return b
+
+    def pen(col, w):
+        p = PV()
+        gp.GdipCreatePen1(col, F(w), 2, ctypes.byref(p))
+        gp.GdipSetPenLineCap197819(p, 2, 2, 0)                    # round caps
+        gp.GdipSetPenLineJoin(p, 2)
+        return p
+
+    st = {"dib": None, "bmp": None, "g": None, "W": 0, "H": 0}
+
+    def free_frame():
+        if st["g"]:
+            gp.GdipDeleteGraphics(st["g"])
+        if st["bmp"]:
+            gp.GdipDisposeImage(st["bmp"])
+        st["g"] = st["bmp"] = None
+
+    def render():
         got = _pill_items()
         if not got:
             return False
         items, level, alarm = got
-        H = S_(34)
-        padx, gap = S_(16), S_(9)
-        widths = []
-        for it in items:
-            k = it[0]
-            widths.append(S_(10) if k in ("dot", "rawdot") else S_(58) if k == "spark" else S_(1) if k == "sep"
-                          else measure(it[1], it[3])[0])
-        total = padx * 2 + sum(widths) + gap * (len(items) - 1) + S_(6) * sum(1 for it in items if it[0] == "sep") * 2
-        W = max(S_(120), total)
-        bmp = gdi32.CreateCompatibleBitmap(scr, W, H)
-        old = gdi32.SelectObject(mdc, bmp)
-        # frame: dark pill with a coloured border (pulses red when memory is critical)
-        border = PILL_COL[level]
-        if alarm and int(time.time() * 1.6) % 2:
-            border = _rgb(255, 150, 140)
-        bg = gdi32.CreateSolidBrush(PILL_COL["bg"])
-        pen = gdi32.CreatePen(0, S_(2), border)
-        ob, op = gdi32.SelectObject(mdc, bg), gdi32.SelectObject(mdc, pen)
-        gdi32.RoundRect(mdc, 0, 0, W, H, H, H)
-        gdi32.SelectObject(mdc, ob)
-        gdi32.SelectObject(mdc, op)
-        gdi32.DeleteObject(bg)
-        gdi32.DeleteObject(pen)
-        gdi32.SetBkMode(mdc, 1)
-        x = padx
+        H, e, r = S_(34), S_(9), S_(15)                             # height, ear (concave top corners), bottom corner radius
+        padx, gap, sep = S_(15), S_(9), S_(13)
+        widths = [S_(9) if it[0] == "dot" else S_(60) if it[0] == "spark" else sep if it[0] == "sep" else measure(it[1], it[3]) for it in items]
+        W = max(S_(140), 2 * e + 2 * padx + sum(widths) + gap * (len(items) - 1))
+        bi = _BMIH(ctypes.sizeof(_BMIH), W, -H, 1, 32, 0, 0, 0, 0, 0, 0)
+        bits = PV()
+        dib = gdi32.CreateDIBSection(mdc, ctypes.byref(bi), 0, ctypes.byref(bits), None, 0)
+        if not dib:
+            return False
+        gdi32.SelectObject(mdc, dib)
+        free_frame()
+        if st["dib"]:
+            gdi32.DeleteObject(st["dib"])
+        st["dib"], st["W"], st["H"] = dib, W, H
+        bmp = PV()
+        gp.GdipCreateBitmapFromScan0(W, H, W * 4, 0x000E200B, bits, ctypes.byref(bmp))     # 32bppPARGB over the DIB memory
+        g = PV()
+        gp.GdipGetImageGraphicsContext(bmp, ctypes.byref(g))
+        st["bmp"], st["g"] = bmp, g
+        gp.GdipSetSmoothingMode(g, 4)                                # anti-alias
+        gp.GdipSetTextRenderingHint(g, 4)
+        gp.GdipSetPixelOffsetMode(g, 2)
+        gp.GdipGraphicsClear(g, 0)
+        # the notch outline: flush with the top edge, concave "ears" where it meets the screen, rounded bottom corners
+        path = PV()
+        gp.GdipCreatePath(0, ctypes.byref(path))
+        gp.GdipAddPathArc(path, F(W - e), F(0), F(2 * e), F(2 * e), F(-90), F(-90))            # right ear
+        gp.GdipAddPathLine(path, F(W - e), F(e), F(W - e), F(H - r))
+        gp.GdipAddPathArc(path, F(W - e - 2 * r), F(H - 2 * r), F(2 * r), F(2 * r), F(0), F(90))   # bottom right
+        gp.GdipAddPathLine(path, F(W - e - r), F(H), F(e + r), F(H))
+        gp.GdipAddPathArc(path, F(e), F(H - 2 * r), F(2 * r), F(2 * r), F(90), F(90))             # bottom left
+        gp.GdipAddPathLine(path, F(e), F(H - r), F(e), F(e))
+        gp.GdipAddPathArc(path, F(-e), F(0), F(2 * e), F(2 * e), F(0), F(-90))                  # left ear
+        fillb = brush(PILL_COL["bg"])
+        gp.GdipFillPath(g, fillb, path)
+        gp.GdipDeleteBrush(fillb)
+        col = PILL_COL[level]
+        glow = (col & 0x00FFFFFF) | ((255 if alarm and int(time.time() * 1.6) % 2 else 150) << 24)
+        po = pen(glow, 1.6 * scale)
+        gp.GdipDrawPath(g, po, path)                                 # coloured rim (not along the top edge)
+        gp.GdipDeletePen(po)
+        gp.GdipDeletePath(path)
+        x = e + padx
         hist = list(PILL["hist"])
         for it, w in zip(items, widths):
             k = it[0]
-            if k in ("dot", "rawdot"):
-                col = PILL_COL[it[1]] if k == "dot" else it[1]
-                br = gdi32.CreateSolidBrush(col)
-                pn = gdi32.CreatePen(5, 0, col)                       # PS_NULL
-                a, b = gdi32.SelectObject(mdc, br), gdi32.SelectObject(mdc, pn)
-                gdi32.Ellipse(mdc, x, (H - w) // 2, x + w, (H + w) // 2)
-                gdi32.SelectObject(mdc, a)
-                gdi32.SelectObject(mdc, b)
-                gdi32.DeleteObject(br)
-                gdi32.DeleteObject(pn)
-            elif k == "spark" and len(hist) >= 2:
+            if k == "dot":
+                b = brush(it[1])
+                gp.GdipFillEllipse(g, b, F(x), F((H - w) / 2), F(w), F(w))
+                gp.GdipDeleteBrush(b)
+            elif k == "spark" and len(hist) >= 3:
                 lo, hi = min(hist), max(hist)
                 hi = max(hi, lo + 4)
-                sh = S_(16)
-                pts = (wintypes.POINT * len(hist))(*[
-                    wintypes.POINT(x + int(i * (w - 1) / (len(hist) - 1)), (H + sh) // 2 - int((v - lo) / (hi - lo) * sh))
-                    for i, v in enumerate(hist)])
-                pn = gdi32.CreatePen(0, S_(2), PILL_COL[it[1]])
-                a = gdi32.SelectObject(mdc, pn)
-                gdi32.Polyline(mdc, pts, len(hist))
-                gdi32.SelectObject(mdc, a)
-                gdi32.DeleteObject(pn)
+                sh = S_(15)
+                pts = (_GpPointF * len(hist))(*[_GpPointF(x + i * (w - 1) / (len(hist) - 1), (H + sh) / 2 - (v - lo) / (hi - lo) * sh) for i, v in enumerate(hist)])
+                p = pen(it[1], 1.7 * scale)
+                gp.GdipDrawCurve(g, p, pts, len(hist))
+                gp.GdipDeletePen(p)
+                b = brush(it[1])
+                gp.GdipFillEllipse(g, b, F(pts[-1].x - S_(2)), F(pts[-1].y - S_(2)), F(S_(4)), F(S_(4)))
+                gp.GdipDeleteBrush(b)
             elif k == "sep":
-                x += S_(6)
-                pn = gdi32.CreatePen(0, 1, PILL_COL["line"])
-                a = gdi32.SelectObject(mdc, pn)
-                pts = (wintypes.POINT * 2)(wintypes.POINT(x, S_(9)), wintypes.POINT(x, H - S_(9)))
-                gdi32.Polyline(mdc, pts, 2)
-                gdi32.SelectObject(mdc, a)
-                gdi32.DeleteObject(pn)
-                x += S_(6)
+                p = pen(PILL_COL["line"], 1.0 * scale)
+                gp.GdipDrawLine(g, p, F(x + w / 2), F(S_(10)), F(x + w / 2), F(H - S_(10)))
+                gp.GdipDeletePen(p)
             elif k == "text":
-                cx, cy = measure(it[1], it[3])
-                gdi32.SetTextColor(mdc, PILL_COL[it[2]])
-                gdi32.TextOutW(mdc, x, (H - cy) // 2, it[1], len(it[1]))
+                b = brush(PILL_COL[it[2]])
+                rc = _GpRectF(x, 0, w + S_(6), H)
+                gp.GdipDrawString(g, it[1], len(it[1]), fonts["bold" if it[3] else "reg"], ctypes.byref(rc), fmt2, b)
+                gp.GdipDeleteBrush(b)
             x += w + gap
-        if state["bmp"]:
-            gdi32.DeleteObject(state["bmp"])                           # the previous frame (already deselected above)
-        state["bmp"] = bmp
-        if (W, H) != PILL["size"]:
-            PILL["size"] = (W, H)
-            gdi32.SelectObject(mdc, bmp)
-            rgn = gdi32.CreateRoundRectRgn(0, 0, W + 1, H + 1, H, H)
-            user32.SetWindowRgn(hwnd, rgn, True)
-        wa = wintypes.RECT()
-        user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(wa), 0)    # SPI_GETWORKAREA
-        user32.SetWindowPos(hwnd, VPp(-1), wa.left + (wa.right - wa.left - W) // 2, wa.top + S_(8), W, H, 0x0010 | 0x0040)
-        user32.InvalidateRect(hwnd, None, False)
         return True
+
+    def present(hwnd, y):
+        W, H = st["W"], st["H"]
+        sw = ctypes.windll.user32.GetSystemMetrics(0)
+        dst = wintypes.POINT((sw - W) // 2, y)
+        size = wintypes.SIZE(W, H)
+        src = wintypes.POINT(0, 0)
+        bl = _BLEND(0, 0, 255, 1)                                    # AC_SRC_OVER, AC_SRC_ALPHA
+        user32.UpdateLayeredWindow(hwnd, scr, ctypes.byref(dst), ctypes.byref(size), mdc, ctypes.byref(src), 0, ctypes.byref(bl), 2)
+
+    def anim_y():
+        a = PILL["anim"]
+        if not a:
+            return 0, False
+        t = min(1.0, (time.time() - a["t0"]) / 0.30)
+        p = 1 - (1 - t) ** 3 if a["dir"] > 0 else (1 - t) ** 3     # slide down (ease-out) / slide up (ease-in)
+        return int(-st["H"] * (1 - p)), t >= 1.0
 
     def want_visible():
         if time.time() < PILL["preview"]:
@@ -2444,53 +2524,68 @@ def _pill_thread():
         wins = find_ui_windows()
         if mode == "minimized":
             return bool(wins) and all(user32.IsIconic(h) for h in wins)
-        return not any(not user32.IsIconic(h) for h in wins)         # "hidden": no dashboard window on screen
+        return not any(not user32.IsIconic(h) for h in wins)
+
+    def on_anim(hwnd):
+        y, done = anim_y()
+        present(hwnd, y)
+        if done:
+            user32.KillTimer(hwnd, PV(2))
+            a = PILL["anim"]
+            PILL["anim"] = None
+            if a and a["dir"] < 0:
+                PILL["shown"] = False
+                user32.ShowWindow(hwnd, 0)
+
+    def start_anim(hwnd, direction):
+        PILL["anim"] = {"dir": direction, "t0": time.time()}
+        user32.SetTimer(hwnd, PV(2), 15, None)
 
     def on_tick(hwnd):
         PILL["tick"] += 1
-        if PILL["tick"] % 2 == 0:                                      # one history sample per second
+        if PILL["tick"] % 2 == 0:                                    # one history sample per second
             with ST.lock:
                 p = ST.sysinfo.get("percent")
             if p is not None:
                 PILL["hist"].append(p)
         try:
-            if want_visible():
-                if render(hwnd):
+            want = want_visible()
+            hiding = bool(PILL["anim"]) and PILL["anim"]["dir"] < 0
+            if want and (not PILL["shown"] or hiding):
+                if render():
+                    if not PILL["shown"]:
+                        user32.ShowWindow(hwnd, 4)                   # SW_SHOWNOACTIVATE
+                    user32.SetWindowPos(hwnd, PV(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)   # topmost, no move/size/activate
                     PILL["shown"] = True
-            elif PILL["shown"]:
-                PILL["shown"] = False
-                user32.ShowWindow(hwnd, 0)
-        except Exception as e:
-            print("minibar error:", e, file=sys.stderr)
+                    start_anim(hwnd, 1)
+            elif want and PILL["shown"]:
+                if render():
+                    present(hwnd, 0 if not PILL["anim"] else anim_y()[0])
+            elif not want and PILL["shown"] and not hiding:
+                start_anim(hwnd, -1)
+        except Exception as ex:
+            print("minibar error:", ex, file=sys.stderr)
 
     def wndproc(hwnd, msg, wparam, lparam):
-        if msg == 0x0113:                                              # WM_TIMER
-            on_tick(hwnd)
+        if msg == 0x0113:                                            # WM_TIMER
+            if wparam == 2:
+                on_anim(hwnd)
+            else:
+                on_tick(hwnd)
             return 0
-        if msg == 0x000F:                                              # WM_PAINT
-            ps = ctypes.create_string_buffer(72)
-            hdc = user32.BeginPaint(hwnd, ps)
-            W, H = PILL["size"]
-            if state["bmp"]:
-                gdi32.SelectObject(mdc, state["bmp"])
-                gdi32.BitBlt(hdc, 0, 0, W, H, mdc, 0, 0, 0x00CC0020)  # SRCCOPY
-            user32.EndPaint(hwnd, ps)
-            return 0
-        if msg == 0x0014:                                              # WM_ERASEBKGND
-            return 1
-        if msg == 0x0021:                                              # WM_MOUSEACTIVATE -> never take focus
+        if msg == 0x0021:                                            # WM_MOUSEACTIVATE -> never take focus
             return 3
-        if msg == 0x0202:                                              # click: bring the dashboard back
+        if msg == 0x0202:                                            # click: bring the dashboard back
             PILL["preview"] = 0.0
             threading.Thread(target=show_window, daemon=True).start()
             return 0
-        if msg == 0x0205:                                              # right click: menu
+        if msg == 0x0205:                                            # right click: menu
             pt = wintypes.POINT()
             user32.GetCursorPos(ctypes.byref(pt))
             menu = user32.CreatePopupMenu()
             user32.AppendMenuW(menu, 0, 1, "Open RamCapper")
             user32.AppendMenuW(menu, 0, 2, "Optimize now")
-            user32.AppendMenuW(menu, 0, 3, "Turn off mini bar")
+            user32.AppendMenuW(menu, 0, 3, "Turn off notch")
             user32.AppendMenuW(menu, 0x800, 0, None)
             user32.AppendMenuW(menu, 0, 4, "Quit RamCapper")
             user32.SetForegroundWindow(hwnd)
@@ -2498,7 +2593,7 @@ def _pill_thread():
             user32.PostMessageW(hwnd, 0, 0, 0)
             user32.DestroyMenu(menu)
             return 0
-        if msg == 0x0111:                                              # WM_COMMAND
+        if msg == 0x0111:                                            # WM_COMMAND
             cmd = wparam & 0xFFFF
             if cmd == 1:
                 threading.Thread(target=show_window, daemon=True).start()
@@ -2517,15 +2612,14 @@ def _pill_thread():
     wc = WNDCLASSW()
     wc.lpfnWndProc, wc.lpszClassName = PILL["proc"], "RamCapperMiniBar"
     wc.hInstance = k32.GetModuleHandleW(None)
-    wc.hCursor = user32.LoadCursorW(None, ctypes.c_void_p(32649))      # IDC_HAND
+    wc.hCursor = user32.LoadCursorW(None, ctypes.c_void_p(32649))    # IDC_HAND
     user32.RegisterClassW(ctypes.byref(wc))
-    # topmost tool window (no taskbar button), layered so it can be slightly translucent, never activated
+    # topmost tool window (no taskbar button), per-pixel-alpha layered, never activated
     hwnd = user32.CreateWindowExW(0x00000008 | 0x00000080 | 0x00080000 | 0x08000000, "RamCapperMiniBar", "RamCapper mini bar",
                                   0x80000000, 0, 0, 10, 10, None, None, wc.hInstance, None)
-    user32.SetLayeredWindowAttributes(hwnd, 0, 240, 2)
     PILL["hwnd"] = hwnd
     psutil.cpu_percent(None)
-    user32.SetTimer(hwnd, VPp(1), 500, None)
+    user32.SetTimer(hwnd, PV(1), 500, None)
     msg = wintypes.MSG()
     while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
         user32.TranslateMessage(ctypes.byref(msg))
