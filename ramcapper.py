@@ -34,7 +34,7 @@ except Exception:
     except Exception:
         pass
 
-VERSION = "1.9.0"
+VERSION = "1.9.1"
 FROZEN = getattr(sys, "frozen", False)
 HERE = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))   # bundled resources
 APP_DIR = os.path.dirname(sys.executable) if FROZEN else os.path.dirname(os.path.abspath(__file__))
@@ -254,6 +254,7 @@ def load_cfg():
         c.setdefault("netrules", [])
         c.setdefault("minibar", "minimized")
         c.setdefault("notch_side", "bottom")
+        c.setdefault("first_run_done", True)             # an existing config means this is not the first run
         return c
     except Exception:
         return json.loads(json.dumps(DEFAULT_CFG))
@@ -1735,6 +1736,7 @@ class Handler(BaseHTTPRequestHandler):
                     new["netrules"] = CFG.get("netrules", [])
                     new["minibar"] = CFG.get("minibar", "minimized")
                     new["notch_side"] = CFG.get("notch_side", "bottom")
+                    new["first_run_done"] = CFG.get("first_run_done", True)
                     CFG = new
                     save_cfg()
                 return self._send(200, new)
@@ -1968,7 +1970,18 @@ def set_shortcut(where, on):
     _make_lnk(path, target, APP_DIR, icon, args)
 
 
-def open_window():
+def _maximize_when_ready():
+    """Browsers ignore a maximize flag for app windows, so wait for the new window to appear and maximize it."""
+    for _ in range(40):
+        time.sleep(0.25)
+        wins = find_ui_windows()
+        if wins:
+            user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+            user32.ShowWindow(wins[0], 3)                 # SW_MAXIMIZE
+            return
+
+
+def open_window(maximized=False):
     url = f"http://127.0.0.1:{PORT}/"
     for exe in (shutil.which("msedge"),
                 r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
@@ -1977,6 +1990,8 @@ def open_window():
                 r"C:\Program Files\Google\Chrome\Application\chrome.exe"):
         if exe and os.path.exists(exe):
             subprocess.Popen([exe, f"--app={url}", "--window-size=1320,900"])
+            if maximized:
+                threading.Thread(target=_maximize_when_ready, daemon=True).start()
             return
     webbrowser.open(url)
 
@@ -3442,7 +3457,12 @@ def main():
         start_tray(first_balloon=not no_open and not takeover)
     start_minibar()
     if not no_open:
-        threading.Timer(1.0, open_window).start()
+        with cfg_lock:
+            first = not CFG.get("first_run_done")
+            if first:                                  # the very first window opens maximized; later ones use the normal size
+                CFG["first_run_done"] = True
+                save_cfg()
+        threading.Timer(1.0, lambda: open_window(maximized=first)).start()
     print(f"RamCapper running on http://127.0.0.1:{PORT}  (admin={ADMIN})")
     try:
         srv.serve_forever()

@@ -46,7 +46,6 @@ document.body.insertAdjacentHTML('afterbegin',`
       <div class="t" style="margin-top:9px" id="selfchip" title="RamCapper's own resource use"><span>RamCapper</span><b>…</b></div>
       <div class="sub hide" id="capchip" style="margin-top:7px"></div>
     </div>
-    <div class="sbox hide" id="adminbox"><div style="margin-bottom:7px">Standard permissions: elevated and system processes can't be trimmed or capped.</div><button class="btn sm primary block" id="b-admin">Restart as administrator</button></div>
     <div class="row" style="gap:8px"><button class="btn sm grow" id="btn-close" title="Close this window. RamCapper keeps monitoring and enforcing limits in the background.">Close window</button><button class="btn sm danger grow" id="btn-quit" title="Fully exit RamCapper: stops monitoring, limits and scanning">⏻ Quit</button></div>
   </div>
 </aside>`);
@@ -123,7 +122,7 @@ async function loadNow(){
   try{
     S.now=await api('/api/now?ui=1');
     $('#conn').classList.remove('off');$('#conn span').textContent='Live · '+new Date().toLocaleTimeString();
-    $('#adminbox').classList.toggle('hide',S.now.admin);
+    addAdminBanner();$('#admin-banner').classList.toggle('hide',S.now.admin);
     const cc=$('#capchip');cc.classList.toggle('hide',!S.now.capped);cc.textContent=S.now.capped+' processes hard-capped';
     const me=S.now.self,sy=S.now.sys;
     $('#selfchip b').textContent=`${fmtB(me.rss)} · ${me.cpu.toFixed(1)}% CPU`;
@@ -159,7 +158,14 @@ async function elevate(){
   if(!confirm('Restart RamCapper with administrator rights?\n\nWindows will ask for permission. Monitoring pauses for a few seconds.'))return;
   try{await api('/api/elevate',{});waitForRestart('Restarting as administrator…')}catch(e){toast(e.message)}
 }
-$('#b-admin').onclick=elevate;
+/* "not running as administrator" warning: shown at the top of every page until RamCapper is restarted elevated */
+function addAdminBanner(){
+  const m=document.querySelector('main.main');
+  if(!m||$('#admin-banner'))return;
+  m.insertAdjacentHTML('afterbegin','<div class="banner row hide" id="admin-banner" style="margin-bottom:18px;gap:10px 14px;flex-wrap:wrap"><span class="grow" style="min-width:240px"><b>Not running as administrator.</b> Elevated and system processes can\'t be trimmed, capped or ended, and per-app bandwidth and network limits are unavailable.</span><button class="btn sm primary" id="b-admin">Restart as administrator</button></div>');
+  $('#b-admin').onclick=elevate;
+}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',addAdminBanner);else addAdminBanner();
 $('#btn-close').onclick=async()=>{let r={};try{r=await api('/api/closing',{})}catch(e){}if(!r.closed){window.close();setTimeout(()=>toast('This browser tab can’t be closed by the page — close it yourself. (RamCapper keeps running.)'),400)}};
 $('#btn-quit').onclick=async()=>{
   if(!confirm('Quit RamCapper completely?\n\nMonitoring, history recording and all limits will stop until you start it again.'))return;
