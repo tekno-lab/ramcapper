@@ -34,7 +34,7 @@ except Exception:
     except Exception:
         pass
 
-VERSION = "1.5.0"
+VERSION = "1.6.0"
 FROZEN = getattr(sys, "frozen", False)
 HERE = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))   # bundled resources
 APP_DIR = os.path.dirname(sys.executable) if FROZEN else os.path.dirname(os.path.abspath(__file__))
@@ -237,6 +237,7 @@ def load_cfg():
         c.setdefault("modules", dict(DEFAULT_CFG["modules"]))
         c.setdefault("netrules", [])
         c.setdefault("minibar", "minimized")
+        c.setdefault("notch_side", "top")
         return c
     except Exception:
         return json.loads(json.dumps(DEFAULT_CFG))
@@ -1668,7 +1669,7 @@ class Handler(BaseHTTPRequestHandler):
                 except OSError:
                     size = 0
                 return self._send(200, {"admin": ADMIN, "data_dir": DATA_DIR, "data_source": DATA_SOURCE, "app_dir": APP_DIR,
-                                        "db_size": size, "frozen": FROZEN, "port": PORT, "version": VERSION, "minibar": pill_mode()})
+                                        "db_size": size, "frozen": FROZEN, "port": PORT, "version": VERSION, "minibar": pill_mode(), "notch_side": pill_side()})
             if u.path == "/api/shortcuts":
                 return self._send(200, shortcut_state())
             if u.path == "/api/net":
@@ -1708,6 +1709,7 @@ class Handler(BaseHTTPRequestHandler):
                     new["modules"] = CFG.get("modules", dict(DEFAULT_CFG["modules"]))
                     new["netrules"] = CFG.get("netrules", [])
                     new["minibar"] = CFG.get("minibar", "minimized")
+                    new["notch_side"] = CFG.get("notch_side", "top")
                     CFG = new
                     save_cfg()
                 return self._send(200, new)
@@ -1743,7 +1745,11 @@ class Handler(BaseHTTPRequestHandler):
                     with cfg_lock:
                         CFG["minibar"] = body["mode"]
                         save_cfg()
-                return self._send(200, {"minibar": pill_mode()})
+                if body.get("side") in PILL_SIDES:
+                    with cfg_lock:
+                        CFG["notch_side"] = body["side"]
+                        save_cfg()
+                return self._send(200, {"minibar": pill_mode(), "notch_side": pill_side()})
             if path == "/api/shortcut":
                 where = body.get("where")
                 if where not in ("start", "desktop"):
@@ -2253,6 +2259,14 @@ def pill_mode():
     return m if m in PILL_MODES else "minimized"
 
 
+PILL_SIDES = ("top", "bottom", "left", "right")
+
+
+def pill_side():
+    m = CFG.get("notch_side", "top")
+    return m if m in PILL_SIDES else "top"
+
+
 def pill_flash(text):
     """Show a short message in the notch for a few seconds (limiter actions)."""
     PILL["flash"] = (text[:64], time.time() + 6)
@@ -2277,8 +2291,8 @@ def _pill_app_color(name):
     return _argb(int(r * 255), int(g * 255), int(b * 255))
 
 
-def _pill_items():
-    """The content of the notch as a list of items, or None while there is no data yet."""
+def _pill_data():
+    """Everything the notch shows, as plain values (None while there is no data yet)."""
     with ST.lock:
         s = dict(ST.sysinfo)
         apps = list(ST.apps.values())
@@ -2288,28 +2302,32 @@ def _pill_items():
     with cfg_lock:
         g = dict(CFG.get("global", {}))
     limit = g.get("threshold", 90) if g.get("enabled") else 90
-    level = "bad" if pct >= limit else ("warn" if pct >= 70 else "ok")
-    cpu = psutil.cpu_percent(None)                     # whole machine (all cores), not a single process
-    items = [("icon", "ram", PILL_COL[level]), ("text", f"{pct:.0f}%", "text", True),
-             ("text", f"{s['used'] / GB_:.1f} / {s['total'] / GB_:.1f} GB", "muted", False),
-             ("spark", PILL_COL[level]), ("sep",),
-             ("icon", "cpu", PILL_COL["accent"]), ("text", "CPU ", "muted", False), ("text", f"{cpu:.0f}%", "text", True)]
-    gpu = PILL.get("gpu")
-    if gpu is not None:
-        items += [("sep",), ("icon", "gpu", PILL_COL["gpu"]), ("text", "GPU ", "muted", False), ("text", f"{gpu:.0f}%", "text", True)]
-    net = PILL.get("net")
-    if net:
-        items += [("sep",), ("icon", "down", PILL_COL["ok"]), ("text", _pill_fmt_rate(net[0]), "text", False),
-                  ("icon", "up", PILL_COL["warn"]), ("text", _pill_fmt_rate(net[1]), "text", False)]
+    top = max(apps, key=lambda a: a["rss"]) if apps else None
+    return {"pct": pct, "used": s["used"], "total": s["total"], "level": "bad" if pct >= limit else ("warn" if pct >= 70 else "ok"),
+            "alarm": pct >= limit, "cpu": psutil.cpu_percent(None),      # whole machine (all cores), not a single process
+            "gpu": PILL.get("gpu"), "net": PILL.get("net"), "top": (top["name"], top["rss"]) if top else None}
+
+
+def _pill_items(d):
+    """The horizontal (top / bottom) layout as a list of items."""
+    items = [("icon", "ram", PILL_COL[d["level"]]), ("text", f"{d['pct']:.0f}%", "text", True),
+             ("text", f"{d['used'] / GB_:.1f} / {d['total'] / GB_:.1f} GB", "muted", False),
+             ("spark", PILL_COL[d["level"]]), ("sep",),
+             ("icon", "cpu", PILL_COL["accent"]), ("text", "CPU ", "muted", False), ("text", f"{d['cpu']:.0f}%", "text", True)]
+    if d["gpu"] is not None:
+        items += [("sep",), ("icon", "gpu", PILL_COL["gpu"]), ("text", "GPU ", "muted", False), ("text", f"{d['gpu']:.0f}%", "text", True)]
+    if d["net"]:
+        items += [("sep",), ("icon", "down", PILL_COL["ok"]), ("text", _pill_fmt_rate(d["net"][0]), "text", False),
+                  ("icon", "up", PILL_COL["warn"]), ("text", _pill_fmt_rate(d["net"][1]), "text", False)]
     items.append(("sep",))
     txt, until = PILL["flash"]
     if txt and time.time() < until:
         items.append(("text", "\u26a1 " + txt, "accent", True))
-    elif apps:
-        top = max(apps, key=lambda a: a["rss"])
-        items += [("dot", _pill_app_color(top["name"])), ("text", top["name"], "text", False),
-                  ("text", f"  {top['rss'] / GB_:.1f} GB" if top["rss"] >= GB_ else f"  {top['rss'] / MB_:.0f} MB", "muted", False)]
-    return items, level, pct >= limit
+    elif d["top"]:
+        name, rss = d["top"]
+        items += [("dot", _pill_app_color(name)), ("text", name, "text", False),
+                  ("text", f"  {rss / GB_:.1f} GB" if rss >= GB_ else f"  {rss / MB_:.0f} MB", "muted", False)]
+    return items
 
 
 def _gpu_loop():
@@ -2405,6 +2423,7 @@ def _pill_thread():
         "GdipCreateFontFamilyFromName": [wintypes.LPCWSTR, PV, PP(PV)], "GdipCreateFont": [PV, F, I, I, PP(PV)],
         "GdipStringFormatGetGenericTypographic": [PP(PV)], "GdipCloneStringFormat": [PV, PP(PV)],
         "GdipSetStringFormatFlags": [PV, I], "GdipSetStringFormatLineAlign": [PV, I],
+        "GdipSetStringFormatAlign": [PV, I], "GdipSetStringFormatTrimming": [PV, I],
         "GdipMeasureString": [PV, wintypes.LPCWSTR, I, PV, PV, PV, PV, PV, PV],
         "GdipDrawString": [PV, wintypes.LPCWSTR, I, PV, PV, PV, PV],
     }.items():
@@ -2451,9 +2470,9 @@ def _pill_thread():
     if not fam:
         gp.GdipCreateFontFamilyFromName("Arial", None, ctypes.byref(fam))
     fonts = {}
-    for key, style in (("reg", 0), ("bold", 1)):
+    for key, style, size in (("reg", 0, 13.0), ("bold", 1, 13.0), ("small", 0, 11.5), ("big", 1, 15.0)):
         fp = PV()
-        gp.GdipCreateFont(fam, F(13.0 * scale), style, 2, ctypes.byref(fp))
+        gp.GdipCreateFont(fam, F(size * scale), style, 2, ctypes.byref(fp))
         fonts[key] = fp
     fmt = PV()
     gp.GdipStringFormatGetGenericTypographic(ctypes.byref(fmt))
@@ -2461,6 +2480,13 @@ def _pill_thread():
     gp.GdipCloneStringFormat(fmt, ctypes.byref(fmt2))
     gp.GdipSetStringFormatFlags(fmt2, 0x1000 | 0x0800)          # no wrap, measure trailing spaces
     gp.GdipSetStringFormatLineAlign(fmt2, 1)                    # centre vertically in the layout box
+    fmtL, fmtR, fmtW = PV(), PV(), PV()                         # left / right aligned (ellipsis when too long) / wrapping
+    for f_, align, flags in ((fmtL, 0, 0x1000), (fmtR, 2, 0x1000), (fmtW, 0, 0)):
+        gp.GdipCloneStringFormat(fmt, ctypes.byref(f_))
+        gp.GdipSetStringFormatFlags(f_, flags)
+        gp.GdipSetStringFormatAlign(f_, align)
+        gp.GdipSetStringFormatTrimming(f_, 3)                    # ellipsis
+        gp.GdipSetStringFormatLineAlign(f_, 1 if f_ is not fmtW else 0)
 
     def measure(text, bold):
         r_in, r_out = _GpRectF(0, 0, 4000, 100), _GpRectF()
@@ -2479,7 +2505,7 @@ def _pill_thread():
         gp.GdipSetPenLineJoin(p, 2)
         return p
 
-    st = {"dib": None, "bmp": None, "g": None, "W": 0, "H": 0}
+    st = {"dib": None, "bmp": None, "g": None, "W": 0, "H": 0, "side": "top"}
 
     def draw_icon(g, kind, x, cy, s, col):
         """Small vector icons (RAM stick, CPU chip, graphics card, down/up arrows), anti-aliased like everything else."""
@@ -2526,17 +2552,117 @@ def _pill_thread():
             gp.GdipDisposeImage(st["bmp"])
         st["g"] = st["bmp"] = None
 
+    def text(g, s_, x, y, w, h, font, colkey, right=False, wrap=False):
+        b = brush(PILL_COL[colkey] if isinstance(colkey, str) else colkey)
+        rc = _GpRectF(x, y, w, h)
+        gp.GdipDrawString(g, s_, len(s_), fonts[font], ctypes.byref(rc), fmtW if wrap else (fmtR if right else fmtL), b)
+        gp.GdipDeleteBrush(b)
+
+    def sparkline(g, hist, x, y, w, h, col, curve_w):
+        lo, hi = min(hist), max(hist)
+        hi = max(hi, lo + 4)
+        pts = (_GpPointF * len(hist))(*[_GpPointF(x + i * (w - 1) / (len(hist) - 1), y + h - (v - lo) / (hi - lo) * h) for i, v in enumerate(hist)])
+        p = pen(col, curve_w)
+        gp.GdipDrawCurve(g, p, pts, len(hist))
+        gp.GdipDeletePen(p)
+        b = brush(col)
+        gp.GdipFillEllipse(g, b, F(pts[-1].x - S_(2)), F(pts[-1].y - S_(2)), F(S_(4)), F(S_(4)))
+        gp.GdipDeleteBrush(b)
+
+    def vpass(g, d, W):
+        """Vertical dock layout for the left/right placement. With g=None it only measures; with a graphics it also draws."""
+        px = S_(18)
+        iw = W - 2 * px
+        y = S_(14)
+        icon_s = float(S_(15))
+
+        def row(icon, label, value, icol, vcol="text", h=S_(22)):
+            nonlocal y
+            if g:
+                draw_icon(g, icon, px, y + h / 2.0, icon_s, icol)
+                text(g, label, px + S_(23), y, iw, h, "reg", "muted")
+                text(g, value, px, y, iw, h, "big", vcol, right=True)
+            y += h
+
+        def bar(frac, col):
+            nonlocal y
+            y += S_(3)
+            bh = S_(5)
+            if g:
+                p = pen(PILL_COL["line"], bh)
+                gp.GdipDrawLine(g, p, F(px + bh / 2.0), F(y + bh / 2.0), F(px + iw - bh / 2.0), F(y + bh / 2.0))
+                gp.GdipDeletePen(p)
+                if frac > 0.005:
+                    p = pen(col, bh)
+                    gp.GdipDrawLine(g, p, F(px + bh / 2.0), F(y + bh / 2.0), F(px + bh / 2.0 + (iw - bh) * min(1.0, frac)), F(y + bh / 2.0))
+                    gp.GdipDeletePen(p)
+            y += bh + S_(9)
+
+        def sep():
+            nonlocal y
+            y += S_(5)
+            if g:
+                p = pen(PILL_COL["line"], 1.0 * scale)
+                gp.GdipDrawLine(g, p, F(px), F(y), F(px + iw), F(y))
+                gp.GdipDeletePen(p)
+            y += S_(10)
+
+        lc = PILL_COL[d["level"]]
+        row("ram", "RAM", f"{d['pct']:.0f}%", lc)
+        bar(d["pct"] / 100.0, lc)
+        if g:
+            text(g, f"{d['used'] / GB_:.1f} / {d['total'] / GB_:.1f} GB", px, y, iw, S_(15), "small", "muted")
+        y += S_(17)
+        hist = list(PILL["hist"])
+        if g and len(hist) >= 3:
+            sparkline(g, hist, px, y + S_(2), iw, S_(22), lc, 1.7 * scale)
+        y += S_(30)
+        sep()
+        row("cpu", "CPU", f"{d['cpu']:.0f}%", PILL_COL["accent"])
+        bar(d["cpu"] / 100.0, PILL_COL["accent"])
+        if d["gpu"] is not None:
+            y += S_(2)
+            row("gpu", "GPU", f"{d['gpu']:.0f}%", PILL_COL["gpu"])
+            bar(d["gpu"] / 100.0, PILL_COL["gpu"])
+        sep()
+        if d["net"]:
+            row("down", "Download", _pill_fmt_rate(d["net"][0]), PILL_COL["ok"])
+            y += S_(4)
+            row("up", "Upload", _pill_fmt_rate(d["net"][1]), PILL_COL["warn"])
+            sep()
+        txt, until = PILL["flash"]
+        if txt and time.time() < until:
+            if g:
+                text(g, "⚡ " + txt, px, y, iw, S_(34), "bold", "accent", wrap=True)
+            y += S_(36)
+        elif d["top"]:
+            name, rss = d["top"]
+            if g:
+                b = brush(_pill_app_color(name))
+                gp.GdipFillEllipse(g, b, F(px), F(y + S_(7)), F(S_(9)), F(S_(9)))
+                gp.GdipDeleteBrush(b)
+                text(g, name, px + S_(16), y, iw - S_(16) - S_(60), S_(22), "reg", "text")
+                text(g, f"{rss / GB_:.1f} GB" if rss >= GB_ else f"{rss / MB_:.0f} MB", px, y, iw, S_(22), "small", "muted", right=True)
+            y += S_(22)
+        return y + S_(14)
+
     def render():
-        got = _pill_items()
-        if not got:
+        d = _pill_data()
+        if not d:
             return False
-        items, level, alarm = got
-        H, m, r = S_(36), S_(2), S_(16)                             # height, margin for the rim, bottom corner radius
-        e = m
-        padx, gap, sep = S_(16), S_(9), S_(13)
-        widths = [S_(9) if it[0] == "dot" else S_(15) if it[0] == "icon" else S_(60) if it[0] == "spark" else sep if it[0] == "sep"
-                  else measure(it[1], it[3]) for it in items]
-        W = max(S_(140), 2 * e + 2 * padx + sum(widths) + gap * (len(items) - 1))
+        side = pill_side()
+        horizontal = side in ("top", "bottom")
+        m, r = S_(2), S_(16)                                         # margin for the rim, corner radius
+        if horizontal:
+            items = _pill_items(d)
+            H, e = S_(36), m
+            padx, gap, sep_w = S_(16), S_(9), S_(13)
+            widths = [S_(9) if it[0] == "dot" else S_(15) if it[0] == "icon" else S_(60) if it[0] == "spark" else sep_w if it[0] == "sep"
+                      else measure(it[1], it[3]) for it in items]
+            W = max(S_(140), 2 * e + 2 * padx + sum(widths) + gap * (len(items) - 1))
+        else:
+            W = S_(204)
+            H = vpass(None, d, W)
         bi = _BMIH(ctypes.sizeof(_BMIH), W, -H, 1, 32, 0, 0, 0, 0, 0, 0)
         bits = PV()
         dib = gdi32.CreateDIBSection(mdc, ctypes.byref(bi), 0, ctypes.byref(bits), None, 0)
@@ -2546,7 +2672,7 @@ def _pill_thread():
         free_frame()
         if st["dib"]:
             gdi32.DeleteObject(st["dib"])
-        st["dib"], st["W"], st["H"] = dib, W, H
+        st["dib"], st["W"], st["H"], st["side"] = dib, W, H, side
         bmp = PV()
         gp.GdipCreateBitmapFromScan0(W, H, W * 4, 0x000E200B, bits, ctypes.byref(bmp))     # 32bppPARGB over the DIB memory
         g = PV()
@@ -2557,26 +2683,50 @@ def _pill_thread():
         gp.GdipSetTextRenderingHint(g, 3)                            # anti-aliased, grid-fitted (crisp) text
         gp.GdipSetPixelOffsetMode(g, 2)
         gp.GdipGraphicsClear(g, 0)
-        # the notch: straight sides coming down from the top edge, rounded bottom corners. The outline is inset by half the
-        # rim width so the rim is fully inside the bitmap (a stroke centred on the edge would be half clipped and look soft).
+        # The body is flush with the screen edge it hangs from (its sides start outside the bitmap, so no line is drawn along that
+        # edge) and has rounded corners on the free side. The outline is inset by half the rim width so the rim is never clipped.
         rim = max(1.0, round(1.5 * scale))
         o = rim / 2.0 + m / 2.0
         path = PV()
         gp.GdipCreatePath(0, ctypes.byref(path))
-        gp.GdipAddPathLine(path, F(o), F(-6), F(o), F(H - o - r))                                  # left side (starts above the screen edge)
-        gp.GdipAddPathArc(path, F(o), F(H - o - 2 * r), F(2 * r), F(2 * r), F(180), F(-90))        # bottom left
-        gp.GdipAddPathLine(path, F(o + r), F(H - o), F(W - o - r), F(H - o))
-        gp.GdipAddPathArc(path, F(W - o - 2 * r), F(H - o - 2 * r), F(2 * r), F(2 * r), F(90), F(-90))   # bottom right
-        gp.GdipAddPathLine(path, F(W - o), F(H - o - r), F(W - o), F(-6))                         # right side
+        A, L = lambda x, y, w, h, a, sw: gp.GdipAddPathArc(path, F(x), F(y), F(w), F(h), F(a), F(sw)), \
+            lambda x1, y1, x2, y2: gp.GdipAddPathLine(path, F(x1), F(y1), F(x2), F(y2))
+        if side == "top":
+            L(o, -6, o, H - o - r)
+            A(o, H - o - 2 * r, 2 * r, 2 * r, 180, -90)
+            L(o + r, H - o, W - o - r, H - o)
+            A(W - o - 2 * r, H - o - 2 * r, 2 * r, 2 * r, 90, -90)
+            L(W - o, H - o - r, W - o, -6)
+        elif side == "bottom":
+            L(o, H + 6, o, o + r)
+            A(o, o, 2 * r, 2 * r, 180, 90)
+            L(o + r, o, W - o - r, o)
+            A(W - o - 2 * r, o, 2 * r, 2 * r, 270, 90)
+            L(W - o, o + r, W - o, H + 6)
+        elif side == "left":
+            L(-6, o, W - o - r, o)
+            A(W - o - 2 * r, o, 2 * r, 2 * r, 270, 90)
+            L(W - o, o + r, W - o, H - o - r)
+            A(W - o - 2 * r, H - o - 2 * r, 2 * r, 2 * r, 0, 90)
+            L(W - o - r, H - o, -6, H - o)
+        else:                                                        # right
+            L(W + 6, o, o + r, o)
+            A(o, o, 2 * r, 2 * r, 270, -90)
+            L(o, o + r, o, H - o - r)
+            A(o, H - o - 2 * r, 2 * r, 2 * r, 180, -90)
+            L(o + r, H - o, W + 6, H - o)
         fillb = brush(PILL_COL["bg"])
         gp.GdipFillPath(g, fillb, path)
         gp.GdipDeleteBrush(fillb)
-        col = PILL_COL[level]
-        glow = (col & 0x00FFFFFF) | ((255 if alarm and int(time.time() * 1.6) % 2 else 215) << 24)
+        col = PILL_COL[d["level"]]
+        glow = (col & 0x00FFFFFF) | ((255 if d["alarm"] and int(time.time() * 1.6) % 2 else 215) << 24)
         po = pen(glow, rim)
-        gp.GdipDrawPath(g, po, path)                                 # coloured rim (not along the top edge)
+        gp.GdipDrawPath(g, po, path)                                 # coloured rim
         gp.GdipDeletePen(po)
         gp.GdipDeletePath(path)
+        if not horizontal:
+            vpass(g, d, W)
+            return True
         x = e + padx
         hist = list(PILL["hist"])
         for it, w in zip(items, widths):
@@ -2586,16 +2736,7 @@ def _pill_thread():
                 gp.GdipFillEllipse(g, b, F(x), F((H - w) / 2), F(w), F(w))
                 gp.GdipDeleteBrush(b)
             elif k == "spark" and len(hist) >= 3:
-                lo, hi = min(hist), max(hist)
-                hi = max(hi, lo + 4)
-                sh = S_(15)
-                pts = (_GpPointF * len(hist))(*[_GpPointF(x + i * (w - 1) / (len(hist) - 1), (H + sh) / 2 - (v - lo) / (hi - lo) * sh) for i, v in enumerate(hist)])
-                p = pen(it[1], 1.7 * scale)
-                gp.GdipDrawCurve(g, p, pts, len(hist))
-                gp.GdipDeletePen(p)
-                b = brush(it[1])
-                gp.GdipFillEllipse(g, b, F(pts[-1].x - S_(2)), F(pts[-1].y - S_(2)), F(S_(4)), F(S_(4)))
-                gp.GdipDeleteBrush(b)
+                sparkline(g, hist, x, (H - S_(15)) / 2.0, w, S_(15), it[1], 1.7 * scale)
             elif k == "icon":
                 draw_icon(g, it[1], x, H / 2.0, float(w), it[2])
             elif k == "sep":
@@ -2610,22 +2751,33 @@ def _pill_thread():
             x += w + gap
         return True
 
-    def present(hwnd, y):
-        W, H = st["W"], st["H"]
+    def present(hwnd, p):
+        """Place the notch on its edge; p is how far it has slid out (0 = hidden behind the edge, 1 = fully out)."""
+        W, H, side = st["W"], st["H"], st["side"]
         sw = ctypes.windll.user32.GetSystemMetrics(0)
-        dst = wintypes.POINT((sw - W) // 2, y)
+        wa = wintypes.RECT()
+        user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(wa), 0)           # SPI_GETWORKAREA: the screen minus the taskbar
+        hide = 1.0 - p
+        if side == "top":
+            x, y = (sw - W) // 2, wa.top - int(H * hide)
+        elif side == "bottom":
+            x, y = (sw - W) // 2, wa.bottom - H + int(H * hide)
+        elif side == "left":
+            x, y = wa.left - int(W * hide), wa.top + (wa.bottom - wa.top - H) // 2
+        else:
+            x, y = wa.right - W + int(W * hide), wa.top + (wa.bottom - wa.top - H) // 2
+        dst = wintypes.POINT(x, y)
         size = wintypes.SIZE(W, H)
         src = wintypes.POINT(0, 0)
         bl = _BLEND(0, 0, 255, 1)                                    # AC_SRC_OVER, AC_SRC_ALPHA
         user32.UpdateLayeredWindow(hwnd, scr, ctypes.byref(dst), ctypes.byref(size), mdc, ctypes.byref(src), 0, ctypes.byref(bl), 2)
 
-    def anim_y():
+    def anim_p():
         a = PILL["anim"]
         if not a:
-            return 0, False
+            return 1.0, False
         t = min(1.0, (time.time() - a["t0"]) / 0.30)
-        p = 1 - (1 - t) ** 3 if a["dir"] > 0 else (1 - t) ** 3     # slide down (ease-out) / slide up (ease-in)
-        return int(-st["H"] * (1 - p)), t >= 1.0
+        return (1 - (1 - t) ** 3 if a["dir"] > 0 else (1 - t) ** 3), t >= 1.0     # slide out (ease-out) / back in (ease-in)
 
     def want_visible():
         if time.time() < PILL["preview"]:
@@ -2641,8 +2793,8 @@ def _pill_thread():
         return not any(not user32.IsIconic(h) for h in wins)
 
     def on_anim(hwnd):
-        y, done = anim_y()
-        present(hwnd, y)
+        pr, done = anim_p()
+        present(hwnd, pr)
         if done:
             user32.KillTimer(hwnd, PV(2))
             a = PILL["anim"]
@@ -2685,7 +2837,7 @@ def _pill_thread():
                     start_anim(hwnd, 1)
             elif want and PILL["shown"]:
                 if render():
-                    present(hwnd, 0 if not PILL["anim"] else anim_y()[0])
+                    present(hwnd, anim_p()[0])
             elif not want and PILL["shown"] and not hiding:
                 start_anim(hwnd, -1)
         except Exception as ex:
