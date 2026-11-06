@@ -55,7 +55,11 @@
     <div class="row" style="margin-top:14px;gap:10px;flex-wrap:wrap">
       <select id="mb-mode"><option value="hidden">Show whenever the window isn't on screen (minimized or closed)</option><option value="minimized">Show only when the window is minimized</option><option value="always">Always show</option><option value="off">Off</option></select>
       <select id="mb-side"><option value="top">Position: top</option><option value="bottom">Position: bottom (above the taskbar)</option><option value="left">Position: left</option><option value="right">Position: right</option></select>
+      <select id="mb-beh"><option value="fixed">Behaviour: stay visible (fixed)</option><option value="edge">Behaviour: pop out when the mouse reaches the screen edge</option></select>
       <button class="btn sm" id="mb-preview">Preview for 6 s</button>
+    </div>
+    <div class="row" style="margin-top:14px;gap:12px">
+      <span class="sub" style="min-width:64px">Opacity</span><input type="range" id="mb-op" min="25" max="100" step="5" style="max-width:280px"><b id="mb-opv" style="width:48px;text-align:right">100%</b>
     </div>
   </section>
   <section class="card">
@@ -93,6 +97,8 @@ window.onInfo=i=>{
   $('#win-max').checked=i.window_maximized!==false;
   if(document.activeElement!==$('#mb-mode'))$('#mb-mode').value=i.minibar||'hidden';
   if(document.activeElement!==$('#mb-side'))$('#mb-side').value=i.notch_side||'bottom';
+  if(document.activeElement!==$('#mb-beh'))$('#mb-beh').value=i.notch_behavior||'fixed';
+  if(document.activeElement!==$('#mb-op')){$('#mb-op').value=i.notch_opacity||100;$('#mb-opv').textContent=(i.notch_opacity||100)+'%'}
   $('#i-dir').textContent=i.data_dir;$('#i-meta').textContent=`history.db ${fmtB(i.db_size)}`;
   const fixed=i.data_source==='arg'||i.data_source==='env';
   $('#i-fixed').classList.toggle('hide',!fixed);$('#i-change').classList.toggle('hide',fixed);
@@ -117,6 +123,9 @@ $('#inst-un').onclick=async()=>{
 $('#inst-run').onchange=async e=>{try{showInstall((await api('/api/startup',{enabled:e.target.checked})));toast(e.target.checked?'Will start with Windows':'Will not start with Windows')}catch(x){toast(x.message);e.target.checked=!e.target.checked}};
 $('#mb-mode').onchange=async e=>{try{await api('/api/minibar',{mode:e.target.value});toast('Mini bar: '+e.target.selectedOptions[0].text.toLowerCase())}catch(x){toast(x.message)}};
 $('#mb-side').onchange=async e=>{try{await api('/api/minibar',{side:e.target.value,preview:true});toast('Notch position: '+e.target.value)}catch(x){toast(x.message)}};
+$('#mb-beh').onchange=async e=>{try{await api('/api/minibar',{behavior:e.target.value,preview:e.target.value==='fixed'});toast(e.target.value==='edge'?'The notch now pops out when your mouse reaches its screen edge':'The notch stays visible')}catch(x){toast(x.message)}};
+$('#mb-op').oninput=e=>{$('#mb-opv').textContent=e.target.value+'%'};
+$('#mb-op').onchange=async e=>{try{await api('/api/minibar',{opacity:+e.target.value,preview:true})}catch(x){toast(x.message)}};
 $('#mb-preview').onclick=()=>api('/api/minibar',{preview:true}).then(()=>toast('Look at the top centre of your screen'));
 let SC={start:false,desktop:false};
 function showSC(st){

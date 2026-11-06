@@ -34,7 +34,7 @@ except Exception:
     except Exception:
         pass
 
-VERSION = "1.9.4"
+VERSION = "1.10.0"
 FROZEN = getattr(sys, "frozen", False)
 HERE = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))   # bundled resources
 APP_DIR = os.path.dirname(sys.executable) if FROZEN else os.path.dirname(os.path.abspath(__file__))
@@ -258,6 +258,8 @@ def load_cfg():
                 c["minibar"] = "hidden"
             c["minibar_v"] = 2
         c.setdefault("notch_side", "bottom")
+        c.setdefault("notch_behavior", "fixed")
+        c.setdefault("notch_opacity", 100)
         c.setdefault("first_run_done", True)
         c.setdefault("window_maximized", True)           # open the dashboard window maximized (Settings can turn this off)
         return c
@@ -1751,7 +1753,8 @@ class Handler(BaseHTTPRequestHandler):
                 except OSError:
                     size = 0
                 return self._send(200, {"admin": ADMIN, "data_dir": DATA_DIR, "data_source": DATA_SOURCE, "app_dir": APP_DIR,
-                                        "db_size": size, "frozen": FROZEN, "port": PORT, "version": VERSION, "minibar": pill_mode(), "notch_side": pill_side(), "window_maximized": bool(CFG.get("window_maximized", True)),
+                                        "db_size": size, "frozen": FROZEN, "port": PORT, "version": VERSION, "minibar": pill_mode(), "notch_side": pill_side(), "notch_behavior": pill_behavior(),
+                                        "notch_opacity": max(25, min(100, int(CFG.get("notch_opacity", 100)))), "window_maximized": bool(CFG.get("window_maximized", True)),
                                         "install": install_info()})
             if u.path == "/api/install":
                 return self._send(200, install_info())
@@ -1798,6 +1801,8 @@ class Handler(BaseHTTPRequestHandler):
                     new["minibar"] = CFG.get("minibar", "hidden")
                     new["minibar_v"] = 2
                     new["notch_side"] = CFG.get("notch_side", "bottom")
+                    new["notch_behavior"] = CFG.get("notch_behavior", "fixed")
+                    new["notch_opacity"] = CFG.get("notch_opacity", 100)
                     new["first_run_done"] = CFG.get("first_run_done", True)
                     new["window_maximized"] = CFG.get("window_maximized", True)
                     CFG = new
@@ -1867,6 +1872,14 @@ class Handler(BaseHTTPRequestHandler):
                 if body.get("side") in PILL_SIDES:
                     with cfg_lock:
                         CFG["notch_side"] = body["side"]
+                        save_cfg()
+                if body.get("behavior") in ("fixed", "edge"):
+                    with cfg_lock:
+                        CFG["notch_behavior"] = body["behavior"]
+                        save_cfg()
+                if body.get("opacity") is not None:
+                    with cfg_lock:
+                        CFG["notch_opacity"] = max(25, min(100, int(body["opacity"])))
                         save_cfg()
                 return self._send(200, {"minibar": pill_mode(), "notch_side": pill_side()})
             if path == "/api/shortcut":
@@ -2376,7 +2389,7 @@ def start_tray(first_balloon):
 # the dashboard window is minimized. Click it to bring the dashboard back; right-click for a menu.
 # Drawn with GDI+ into a per-pixel-alpha layered window, so every curve is anti-aliased.
 PILL_MODES = ("off", "minimized", "hidden", "always")
-PILL = {"hwnd": None, "flash": ("", 0.0), "preview": 0.0, "hist": deque(maxlen=60), "tick": 0, "shown": False, "anim": None,
+PILL = {"near_until": 0.0, "eligible": False, "last_want": False, "hwnd": None, "flash": ("", 0.0), "preview": 0.0, "hist": deque(maxlen=60), "tick": 0, "shown": False, "anim": None,
         "frame": None}
 gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
 MB_ = 1048576
@@ -2389,6 +2402,19 @@ def pill_mode():
 
 
 PILL_SIDES = ("top", "bottom", "left", "right")
+
+
+def pill_behavior():
+    """"fixed" = visible whenever the show-mode says so; "edge" = hidden until the mouse reaches the screen edge it sits on."""
+    return "edge" if CFG.get("notch_behavior") == "edge" else "fixed"
+
+
+def pill_alpha():
+    try:
+        o = int(CFG.get("notch_opacity", 100))
+    except (TypeError, ValueError):
+        o = 100
+    return max(25, min(100, o)) * 255 // 100
 
 
 def pill_side():
@@ -3058,7 +3084,7 @@ def _pill_thread():
         dst = wintypes.POINT(x, y)
         size = wintypes.SIZE(W, H)
         src = wintypes.POINT(0, 0)
-        bl = _BLEND(0, 0, 255, 1)                                    # AC_SRC_OVER, AC_SRC_ALPHA
+        bl = _BLEND(0, 0, pill_alpha(), 1)                           # AC_SRC_OVER, AC_SRC_ALPHA (constant alpha = the opacity setting)
         user32.UpdateLayeredWindow(hwnd, scr, ctypes.byref(dst), ctypes.byref(size), mdc, ctypes.byref(src), 0, ctypes.byref(bl), 2)
 
     def anim_p():
@@ -3081,6 +3107,40 @@ def _pill_thread():
             return bool(wins) and all(user32.IsIconic(h) for h in wins)
         return not any(not user32.IsIconic(h) for h in wins)
 
+    def near_edge(pt):
+        """Is the mouse at the screen edge the notch sits on (within its span), or still over the notch while it is out?"""
+        side = pill_side()
+        wa = wintypes.RECT()
+        user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(wa), 0)
+        W, H = st["W"], st["H"]
+        if not W:
+            W, H = (S_(820), S_(36)) if side in ("top", "bottom") else (S_(204), S_(330))
+        sw = ctypes.windll.user32.GetSystemMetrics(0)
+        band, pad, hold = S_(4), S_(28), S_(10)
+        out = PILL["shown"] and time.time() < PILL["near_until"]                 # currently slid out: be forgiving
+        if side == "top":
+            return abs(pt.x - sw // 2) <= W // 2 + pad and (pt.y <= wa.top + band or (out and pt.y <= wa.top + H + hold))
+        if side == "bottom":
+            return abs(pt.x - sw // 2) <= W // 2 + pad and (pt.y >= wa.bottom - band or (out and pt.y >= wa.bottom - H - hold))
+        cy = (wa.top + wa.bottom) // 2
+        if side == "left":
+            return abs(pt.y - cy) <= H // 2 + pad and (pt.x <= wa.left + band or (out and pt.x <= wa.left + W + hold))
+        return abs(pt.y - cy) <= H // 2 + pad and (pt.x >= wa.right - band or (out and pt.x >= wa.right - W - hold))
+
+    def hover(hwnd):
+        """80 ms mouse watcher, only active in the "pop out at the edge" behaviour."""
+        if pill_behavior() != "edge" or not PILL["eligible"]:
+            return
+        pt = wintypes.POINT()
+        user32.GetCursorPos(ctypes.byref(pt))
+        now = time.time()
+        if near_edge(pt):
+            PILL["near_until"] = now + 0.7                              # stay out a moment after the mouse leaves
+        want = now < PILL["near_until"] or now < PILL["preview"]
+        if want != PILL["last_want"]:
+            PILL["last_want"] = want
+            update_visibility(hwnd)
+
     def on_anim(hwnd):
         pr, done = anim_p()
         present(hwnd, pr)
@@ -3095,6 +3155,27 @@ def _pill_thread():
     def start_anim(hwnd, direction):
         PILL["anim"] = {"dir": direction, "t0": time.time()}
         user32.SetTimer(hwnd, PV(2), 15, None)
+
+    def update_visibility(hwnd):
+        elig = want_visible()
+        PILL["eligible"] = elig
+        want = elig
+        if elig and pill_behavior() == "edge" and time.time() >= PILL["preview"]:
+            want = time.time() < PILL["near_until"]                    # waits for the mouse at the screen edge
+        PILL["last_want"] = want
+        hiding = bool(PILL["anim"]) and PILL["anim"]["dir"] < 0
+        if want and (not PILL["shown"] or hiding):
+            if render():
+                if not PILL["shown"]:
+                    user32.ShowWindow(hwnd, 4)                           # SW_SHOWNOACTIVATE
+                user32.SetWindowPos(hwnd, PV(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)   # topmost, no move/size/activate
+                PILL["shown"] = True
+                start_anim(hwnd, 1)
+        elif want and PILL["shown"]:
+            if render():
+                present(hwnd, anim_p()[0])
+        elif not want and PILL["shown"] and not hiding:
+            start_anim(hwnd, -1)
 
     def on_tick(hwnd):
         PILL["tick"] += 1
@@ -3115,20 +3196,7 @@ def _pill_thread():
             if p is not None:
                 PILL["hist"].append(p)
         try:
-            want = want_visible()
-            hiding = bool(PILL["anim"]) and PILL["anim"]["dir"] < 0
-            if want and (not PILL["shown"] or hiding):
-                if render():
-                    if not PILL["shown"]:
-                        user32.ShowWindow(hwnd, 4)                   # SW_SHOWNOACTIVATE
-                    user32.SetWindowPos(hwnd, PV(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)   # topmost, no move/size/activate
-                    PILL["shown"] = True
-                    start_anim(hwnd, 1)
-            elif want and PILL["shown"]:
-                if render():
-                    present(hwnd, anim_p()[0])
-            elif not want and PILL["shown"] and not hiding:
-                start_anim(hwnd, -1)
+            update_visibility(hwnd)
         except Exception as ex:
             print("minibar error:", ex, file=sys.stderr)
 
@@ -3136,6 +3204,8 @@ def _pill_thread():
         if msg == 0x0113:                                            # WM_TIMER
             if wparam == 2:
                 on_anim(hwnd)
+            elif wparam == 3:
+                hover(hwnd)
             else:
                 on_tick(hwnd)
             return 0
@@ -3186,6 +3256,7 @@ def _pill_thread():
     PILL["hwnd"] = hwnd
     psutil.cpu_percent(None)
     user32.SetTimer(hwnd, PV(1), 500, None)
+    user32.SetTimer(hwnd, PV(3), 80, None)                           # mouse watcher for the "pop out at the edge" behaviour
     msg = wintypes.MSG()
     while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
         user32.TranslateMessage(ctypes.byref(msg))
