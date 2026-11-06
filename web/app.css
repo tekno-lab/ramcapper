@@ -179,3 +179,13 @@ th .colbtn:hover{background:var(--panel3);color:var(--text)}
 .rate.hot{color:var(--accent);font-weight:600}
 th{white-space:nowrap}
 td.r{white-space:nowrap}
+
+/* wide tables scroll inside their card instead of pushing the page (and the side panel) off-screen */
+.card:has(table):not(:has(.cb)){overflow-x:auto}
+.main{min-width:0}
+.drawer{width:min(640px,100vw)}
+.drawer table{table-layout:fixed}
+.drawer td:first-child{overflow:hidden}
+.drawer .cmd{max-width:none}
+.drawer td.r:last-child,.drawer th:last-child{width:128px}
+.drawer td.r,.drawer th.r{width:92px}

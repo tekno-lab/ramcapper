@@ -26,7 +26,7 @@ from urllib.parse import parse_qs, urlparse
 
 import psutil
 
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 FROZEN = getattr(sys, "frozen", False)
 HERE = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))   # bundled resources
 APP_DIR = os.path.dirname(sys.executable) if FROZEN else os.path.dirname(os.path.abspath(__file__))
