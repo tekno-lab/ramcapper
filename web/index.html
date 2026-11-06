@@ -10,6 +10,7 @@
 <body data-page="index" data-title="Memory">
 <script src="/app.js"></script>
 <main class="main">
+  <div class="banner hide row" id="inst-banner" style="margin-bottom:18px"><span class="grow"><b>Install RamCapper?</b> You're running the portable version. Install it to Program Files for a Start menu entry, auto-start and an uninstaller – the portable file keeps working.</span><a class="btn sm primary" href="/settings.html">Install…</a><button class="btn sm" id="inst-no">Not now</button></div>
   <header class="phead">
     <div class="grow"><h1>Memory</h1><p>What is using your RAM right now, and what used it over time.</p></div>
     <div class="pact">
@@ -140,6 +141,9 @@ $('#d-kill').onclick=async()=>{if(confirm(`End ALL ${S.open} processes? Unsaved 
 bindHover($('#chart'),$('#tip'),()=>S.hist);
 bindHover($('#dchart'),$('#dtip'),()=>S.dhist);
 window.addEventListener('resize',()=>{renderChart();renderDrawer()});
+window.onInfo=i=>{let hide=false;try{hide=localStorage.getItem('rc.instdismiss')==='1'}catch(e){}
+  $('#inst-banner').classList.toggle('hide',hide||!i.install||!i.install.frozen||i.install.running_installed)};
+$('#inst-no').onclick=()=>{try{localStorage.setItem('rc.instdismiss','1')}catch(e){}$('#inst-banner').classList.add('hide')};
 boot();loadHist();setInterval(loadHist,6000);
 </script>
 </body>

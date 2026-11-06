@@ -13,6 +13,18 @@
   <header class="phead">
     <div class="grow"><h1>Settings</h1><p>Where RamCapper keeps its data, and the permissions it runs with.</p></div>
   </header>
+  <section class="card" id="install">
+    <div class="row"><div class="grow"><h3>Install RamCapper</h3><div class="sub" id="inst-sub">&nbsp;</div></div></div>
+    <div class="row" style="margin-top:14px;gap:18px;flex-wrap:wrap" id="inst-opts">
+      <label class="row sub" style="gap:8px"><input type="checkbox" id="inst-desktop" checked> Desktop shortcut</label>
+      <label class="row sub" style="gap:8px"><input type="checkbox" id="inst-startup" checked> Start with Windows</label>
+    </div>
+    <div class="row" style="margin-top:14px;gap:10px;flex-wrap:wrap">
+      <button class="btn primary" id="inst-go">Install to Program Files…</button>
+      <button class="btn danger hide" id="inst-un">Uninstall…</button>
+    </div>
+    <div class="row" style="margin-top:16px;padding-top:14px;border-top:1px solid var(--line2)"><div class="grow"><b>Start with Windows</b><div class="sub">Launch RamCapper hidden in the tray when you sign in – works for the portable copy too.</div></div><label class="sw"><input type="checkbox" id="inst-run"><s></s></label></div>
+  </section>
   <div class="grid2">
     <div class="card">
       <h3>Data folder</h3><div class="sub">Where RamCapper keeps <b>history.db</b> (memory history, events, devices) and <b>config.json</b> (limits, switches).</div>
@@ -56,7 +68,19 @@
   </section>
 </main>
 <script>
+function showInstall(n){
+  const go=$('#inst-go'),un=$('#inst-un'),sub=$('#inst-sub');
+  $('#inst-run').checked=n.startup;
+  un.classList.toggle('hide',!n.installed);
+  if(!n.frozen){sub.textContent='Installing is available in the RamCapper.exe build. You are running from source.';go.disabled=true;$('#inst-opts').classList.add('hide');return}
+  go.disabled=false;$('#inst-opts').classList.remove('hide');go.classList.remove('hide');
+  if(n.running_installed){sub.textContent='RamCapper is installed at '+n.dir+'. Your history and settings live in %APPDATA%\\RamCapper.';go.textContent='Reinstall / repair…';
+    $('#inst-opts').classList.add('hide');go.classList.add('hide')}
+  else if(n.installed){sub.textContent='RamCapper is also installed at '+n.dir+'. This window is the portable copy – you can update the installed copy from it.';go.textContent='Update installed copy…'}
+  else{sub.textContent='You are running the portable version. Install it to Program Files for a Start menu entry, optional auto-start and an uninstaller. The portable file keeps working either way.';go.textContent='Install to Program Files…'}
+}
 window.onInfo=i=>{
+  showInstall(i.install);
   if(document.activeElement!==$('#mb-mode'))$('#mb-mode').value=i.minibar||'minimized';
   if(document.activeElement!==$('#mb-side'))$('#mb-side').value=i.notch_side||'bottom';
   $('#i-dir').textContent=i.data_dir;$('#i-meta').textContent=`history.db ${fmtB(i.db_size)}`;
@@ -69,6 +93,17 @@ window.onInfo=i=>{
     .map(([k,v])=>`<span>${k}</span><span style="word-break:break-all">${esc(v)}</span>`).join('');
 };
 $('#i-elev').onclick=elevate;
+$('#inst-go').onclick=async()=>{
+  const n=S.info.install;
+  if(!confirm((n.installed?'Update the installed copy at ':'Install RamCapper to ')+n.dir+'?\n\nWindows will ask for permission. RamCapper restarts from the installed copy and your history is kept.'))return;
+  try{await api('/api/install',{desktop:$('#inst-desktop').checked,startup:$('#inst-startup').checked});waitForRestart('Installing RamCapper…')}catch(e){toast(e.message)}
+};
+$('#inst-un').onclick=async()=>{
+  if(!confirm('Uninstall RamCapper from Program Files?\n\nShortcuts and the auto-start entry are removed. Windows will ask for permission.'))return;
+  const purge=confirm('Also delete your history and settings?\n\nOK = delete them too, Cancel = keep them.');
+  try{await api('/api/uninstall',{purge});document.body.innerHTML='<div style="display:grid;place-content:center;height:100vh;width:100%;text-align:center;font:16px Segoe UI;color:#8b98a9"><b style="font-size:20px;color:#e6edf3">RamCapper is being uninstalled</b><br>You can close this window.</div>';setTimeout(()=>window.close(),800)}catch(e){toast(e.message)}
+};
+$('#inst-run').onchange=async e=>{try{showInstall((await api('/api/startup',{enabled:e.target.checked})));toast(e.target.checked?'Will start with Windows':'Will not start with Windows')}catch(x){toast(x.message);e.target.checked=!e.target.checked}};
 $('#mb-mode').onchange=async e=>{try{await api('/api/minibar',{mode:e.target.value});toast('Mini bar: '+e.target.selectedOptions[0].text.toLowerCase())}catch(x){toast(x.message)}};
 $('#mb-side').onchange=async e=>{try{await api('/api/minibar',{side:e.target.value,preview:true});toast('Notch position: '+e.target.value)}catch(x){toast(x.message)}};
 $('#mb-preview').onclick=()=>api('/api/minibar',{preview:true}).then(()=>toast('Look at the top centre of your screen'));

@@ -47,6 +47,7 @@
 - **Single instance** – starting RamCapper again, or clicking the tray icon, focuses the open window instead of opening another. A newer version automatically replaces an older one that is still running. (Task Manager shows two `RamCapper.exe` entries for the one-file build – that is PyInstaller's launcher plus the app, not two copies.)
 - **Shortcuts** – add RamCapper to the Start menu or desktop from **Settings**, then pin it to the taskbar from there (Windows does not let apps pin themselves).
 - **Administrator mode** – restart elevated from the app (UAC prompt) to manage elevated/system processes, see per-app bandwidth and create network limits.
+- **Optional installer (like AnyDesk)** – the portable `.exe` works as-is, and **Settings → Install RamCapper** can also install it to `C:\Program Files\RamCapper` with a Start menu entry, optional desktop shortcut and auto-start, plus an "Apps & features" uninstall entry. Your history moves with it (installed copies keep data in `%APPDATA%\RamCapper`). **Uninstall** removes everything and can keep or delete your data.
 - **Portable** – single `.exe`, no installer. History and settings live in a folder you choose, which can be moved from Settings.
 - **Safe by design** – clipboard owners are never trimmed, critical Windows processes can't be ended, and the web UI only listens on `127.0.0.1`.
 
@@ -118,6 +119,8 @@ python tools/make_icon.py
 | `RamCapper.exe --data "E:\RamCapperData"` | Use a specific data folder. |
 | `RamCapper.exe --no-open` | Run in the background without opening a window. |
 | `RamCapper.exe --no-tray` | Don't show the notification-area icon. |
+| `RamCapper.exe --install` | Install to Program Files (UAC prompt). Add `--no-desktop`, `--no-startup` to skip those. |
+| `RamCapper.exe --uninstall` | Remove an installed copy (also used by Windows' "Apps & features"). `--purge` deletes history and settings. |
 
 You can also restart as administrator and move the data folder from the **Settings** tab.
 

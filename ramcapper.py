@@ -34,7 +34,7 @@ except Exception:
     except Exception:
         pass
 
-VERSION = "1.7.0"
+VERSION = "1.8.0"
 FROZEN = getattr(sys, "frozen", False)
 HERE = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))   # bundled resources
 APP_DIR = os.path.dirname(sys.executable) if FROZEN else os.path.dirname(os.path.abspath(__file__))
@@ -42,6 +42,22 @@ APP_DIR = os.path.dirname(sys.executable) if FROZEN else os.path.dirname(os.path
 
 POINTERS = [os.path.join(APP_DIR, "datadir.txt"),
             os.path.join(os.environ.get("APPDATA", APP_DIR), "RamCapper", "datadir.txt")]
+
+
+def _default_dir():
+    """Next to the program - unless that folder is not writable (e.g. an installed copy in Program Files), then %APPDATA%\\RamCapper."""
+    inst = os.environ.get("RAMCAPPER_INSTALL_DIR") or os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "RamCapper")
+    appdata = os.path.join(os.environ.get("APPDATA", APP_DIR), "RamCapper")
+    if FROZEN and os.path.normcase(os.path.abspath(APP_DIR)) == os.path.normcase(os.path.abspath(inst)):
+        return appdata                                         # an installed copy always keeps its data in %APPDATA%, elevated or not
+    try:
+        t = os.path.join(APP_DIR, ".rc_write_test")
+        with open(t, "w"):
+            pass
+        os.remove(t)
+        return APP_DIR
+    except OSError:
+        return os.path.join(os.environ.get("APPDATA", APP_DIR), "RamCapper")
 
 
 def _data_dir():
@@ -66,7 +82,7 @@ def _data_dir():
                 pass
     if not arg:
         src = "default"
-    d = os.path.abspath(os.path.expandvars(os.path.expanduser(arg))) if arg else APP_DIR
+    d = os.path.abspath(os.path.expandvars(os.path.expanduser(arg))) if arg else _default_dir()
     os.makedirs(d, exist_ok=True)
     return d, src
 
@@ -1669,7 +1685,10 @@ class Handler(BaseHTTPRequestHandler):
                 except OSError:
                     size = 0
                 return self._send(200, {"admin": ADMIN, "data_dir": DATA_DIR, "data_source": DATA_SOURCE, "app_dir": APP_DIR,
-                                        "db_size": size, "frozen": FROZEN, "port": PORT, "version": VERSION, "minibar": pill_mode(), "notch_side": pill_side()})
+                                        "db_size": size, "frozen": FROZEN, "port": PORT, "version": VERSION, "minibar": pill_mode(), "notch_side": pill_side(),
+                                        "install": install_info()})
+            if u.path == "/api/install":
+                return self._send(200, install_info())
             if u.path == "/api/gpu":
                 return self._send(200, gpu_payload())
             if u.path == "/api/shortcuts":
@@ -1740,6 +1759,30 @@ class Handler(BaseHTTPRequestHandler):
                     Net.force_ident = True      # a manual scan re-identifies every device
                     threading.Thread(target=net_scan, daemon=True).start()
                 return self._send(200, {})
+            if path in ("/api/install", "/api/uninstall"):
+                if not FROZEN:
+                    return self._send(400, {"error": "Installing is only available in the RamCapper.exe build."})
+                if path == "/api/install":
+                    args = ["--install", "--silent", "--data", DATA_DIR, "--from", sys.executable]
+                    if not body.get("desktop", True):
+                        args.append("--no-desktop")
+                    if not body.get("startup", True):
+                        args.append("--no-startup")
+                else:
+                    if not install_info()["installed"]:
+                        return self._send(400, {"error": "RamCapper is not installed."})
+                    args = ["--uninstall", "--silent"] + (["--purge"] if body.get("purge") else [])
+                if not _spawn_with_args(args):
+                    return self._send(400, {"error": "Administrator permission was not granted."})
+                self._send(200, {"ok": True})
+                threading.Timer(1.0, quit_app).start()                 # the installer waits for us to exit, then continues
+                return
+            if path == "/api/startup":
+                try:
+                    set_startup(bool(body.get("enabled")))
+                except Exception as e:
+                    return self._send(400, {"error": str(e)})
+                return self._send(200, install_info())
             if path == "/api/minibar":
                 if body.get("preview"):
                     PILL["preview"] = time.time() + 6
@@ -3075,6 +3118,216 @@ def start_minibar():
     threading.Thread(target=_gpu_loop, daemon=True).start()
 
 
+# ---------------------------------------------------------------- install / uninstall
+# RamCapper.exe stays fully portable. In addition it can install itself like AnyDesk does: copy itself to Program Files, add
+# Start menu / desktop shortcuts, an "Apps & features" uninstall entry and (optionally) start with Windows.
+PROGRAM_FILES = os.environ.get("ProgramFiles", r"C:\Program Files")
+INSTALL_DIR = os.environ.get("RAMCAPPER_INSTALL_DIR") or os.path.join(PROGRAM_FILES, "RamCapper")     # the override is for testing
+INSTALL_EXE = os.path.join(INSTALL_DIR, "RamCapper.exe")
+UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\RamCapper"
+RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+
+
+def is_installed_copy():
+    return FROZEN and os.path.normcase(os.path.abspath(APP_DIR)) == os.path.normcase(os.path.abspath(INSTALL_DIR))
+
+
+def _run_value():
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
+            return winreg.QueryValueEx(k, "RamCapper")[0]
+    except OSError:
+        return None
+
+
+def set_startup(on, exe=None):
+    """Start RamCapper (hidden, in the tray) when you sign in to Windows."""
+    import winreg
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
+        if on:
+            if FROZEN or exe:
+                cmd = f'"{exe or sys.executable}" --no-open'
+            else:
+                pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+                cmd = f'"{pyw if os.path.exists(pyw) else sys.executable}" "{os.path.abspath(__file__)}" --no-open'
+            winreg.SetValueEx(k, "RamCapper", 0, winreg.REG_SZ, cmd)
+        else:
+            try:
+                winreg.DeleteValue(k, "RamCapper")
+            except FileNotFoundError:
+                pass
+
+
+def _lnk_locations():
+    start_all = os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"), "Microsoft", "Windows", "Start Menu", "Programs", "RamCapper.lnk")
+    desk_pub = os.path.join(os.environ.get("PUBLIC", r"C:\Users\Public"), "Desktop", "RamCapper.lnk")
+    return {"start_all": start_all, "start_user": shortcut_path("start"), "desktop_user": shortcut_path("desktop"), "desktop_all": desk_pub}
+
+
+def _make_lnk(path, target, workdir, icon, args=""):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    _ps("$s=(New-Object -ComObject WScript.Shell).CreateShortcut(%s);$s.TargetPath=%s;$s.Arguments=%s;$s.WorkingDirectory=%s;"
+        "$s.IconLocation=%s;$s.Description='RamCapper - RAM monitor and limiter';$s.Save()"
+        % (_psq(path), _psq(target), _psq(args), _psq(workdir), _psq(icon)))
+
+
+def install_info():
+    return {"frozen": FROZEN, "dir": INSTALL_DIR, "installed": os.path.exists(INSTALL_EXE), "running_installed": is_installed_copy(),
+            "startup": _run_value() is not None, "version": VERSION}
+
+
+def _msgbox(text, title="RamCapper", flags=0x40):
+    return ctypes.windll.user32.MessageBoxW(None, text, title, flags | 0x10000)       # MB_SETFOREGROUND
+
+
+def _wait_instance_gone(timeout=20):
+    """Ask a running RamCapper to quit and wait until its port is free (so its exe can be replaced / removed)."""
+    base = f"http://127.0.0.1:{PORT}"
+    asked = False
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            urllib.request.urlopen(base + "/api/info", timeout=1).read()
+        except Exception:
+            return True
+        if not asked:
+            asked = True
+            try:
+                urllib.request.urlopen(urllib.request.Request(base + "/api/quit", data=b"{}", method="POST", headers={"X-RamCapper": "1"}), timeout=2).read()
+            except Exception:
+                pass
+        time.sleep(0.5)
+    return False
+
+
+def do_install(desktop=True, startup=True):
+    if not FROZEN:
+        raise RuntimeError("Installing is only available in the RamCapper.exe build.")
+    _wait_instance_gone()
+    os.makedirs(INSTALL_DIR, exist_ok=True)
+    for attempt in range(30):
+        try:
+            if os.path.normcase(os.path.abspath(sys.executable)) != os.path.normcase(INSTALL_EXE):
+                shutil.copy2(sys.executable, INSTALL_EXE)
+            break
+        except PermissionError:
+            if attempt == 29:
+                raise
+            time.sleep(0.5)
+    # the installed copy keeps its data in %APPDATA%\RamCapper (Program Files is read-only for normal users): bring the history along
+    dest = os.path.join(os.environ.get("APPDATA", INSTALL_DIR), "RamCapper")
+    os.makedirs(dest, exist_ok=True)
+    if os.path.normcase(os.path.abspath(DATA_DIR)) != os.path.normcase(dest):
+        copied_db = False
+        for f in ("history.db", "config.json", "history.db-wal", "history.db-shm"):
+            src, dst = os.path.join(DATA_DIR, f), os.path.join(dest, f)
+            if os.path.exists(src) and not os.path.exists(dst) and (f in ("history.db", "config.json") or copied_db):
+                shutil.copy2(src, dst)
+                copied_db = copied_db or f == "history.db"
+    import winreg
+    vals = [("DisplayName", "RamCapper", winreg.REG_SZ), ("DisplayVersion", VERSION, winreg.REG_SZ), ("Publisher", "tekno-lab", winreg.REG_SZ),
+            ("InstallLocation", INSTALL_DIR, winreg.REG_SZ), ("DisplayIcon", INSTALL_EXE, winreg.REG_SZ),
+            ("UninstallString", f'"{INSTALL_EXE}" --uninstall', winreg.REG_SZ), ("URLInfoAbout", "https://github.com/tekno-lab/ramcapper", winreg.REG_SZ),
+            ("NoModify", 1, winreg.REG_DWORD), ("NoRepair", 1, winreg.REG_DWORD),
+            ("EstimatedSize", max(1, os.path.getsize(INSTALL_EXE) // 1024), winreg.REG_DWORD)]
+    for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):          # machine-wide when elevated, else just this user
+        try:
+            with winreg.CreateKeyEx(hive, UNINSTALL_KEY, 0, winreg.KEY_SET_VALUE) as k:
+                for n, v, t in vals:
+                    winreg.SetValueEx(k, n, 0, t, v)
+            break
+        except PermissionError:
+            continue
+    loc = _lnk_locations()
+    try:                                                                         # Start menu: for all users when we may, else this user only
+        _make_lnk(loc["start_all"], INSTALL_EXE, INSTALL_DIR, INSTALL_EXE)
+        _rm(loc["start_user"])
+    except Exception:
+        _make_lnk(loc["start_user"], INSTALL_EXE, INSTALL_DIR, INSTALL_EXE)
+    if desktop:
+        _make_lnk(loc["desktop_user"], INSTALL_EXE, INSTALL_DIR, INSTALL_EXE)
+    else:
+        _rm(loc["desktop_user"])
+    set_startup(bool(startup), INSTALL_EXE)
+
+
+def _rm(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def do_uninstall(purge=False):
+    _wait_instance_gone()
+    import winreg
+    for v in _lnk_locations().values():
+        _rm(v)
+    try:
+        set_startup(False)
+    except OSError:
+        pass
+    for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+        try:
+            winreg.DeleteKey(hive, UNINSTALL_KEY)
+        except OSError:
+            pass
+    if purge:
+        shutil.rmtree(os.path.join(os.environ.get("APPDATA", ""), "RamCapper"), ignore_errors=True)
+    if os.path.basename(INSTALL_DIR.rstrip("\\/")).lower() == "ramcapper" and os.path.isdir(INSTALL_DIR):
+        # the running exe cannot delete itself: a detached helper removes the folder a few seconds after we exit
+        d = _psq(INSTALL_DIR)
+        subprocess.Popen(["powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command",
+                          f"Start-Sleep 2; for($i=0;$i -lt 30 -and (Test-Path -LiteralPath {d});$i++){{Remove-Item -LiteralPath {d} -Recurse -Force -ErrorAction SilentlyContinue;Start-Sleep 1}}"],
+                         creationflags=NOWIN | 0x00000200, close_fds=True)
+
+
+def _spawn_with_args(args, elevate=True):
+    """Run this exe with args, elevated unless already admin. Returns True when started (False if UAC was declined)."""
+    if ADMIN or not elevate:
+        env = dict(os.environ, PYINSTALLER_RESET_ENVIRONMENT="1")
+        subprocess.Popen([sys.executable] + args, env=env, close_fds=True, creationflags=0x00000008 | 0x00000200)
+        return True
+    return ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, subprocess.list2cmdline(args), None, 0) > 32
+
+
+def cli_installer():
+    """--install / --uninstall (also what Settings and Windows' "Apps & features" run)."""
+    argv = sys.argv[1:]
+    test = bool(os.environ.get("RAMCAPPER_INSTALL_DIR"))
+    if not ADMIN and not test:
+        if not ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, subprocess.list2cmdline(argv), None, 1) > 32:
+            _msgbox("Administrator permission is needed to install or remove RamCapper in Program Files.", flags=0x30)
+        return
+    silent = "--silent" in argv
+    src_exe = next((argv[i + 1] for i, a in enumerate(argv) if a == "--from" and i + 1 < len(argv)), None)
+    if "--uninstall" in argv:
+        purge = "--purge" in argv
+        if not silent:
+            if _msgbox("Remove RamCapper from this PC?", "Uninstall RamCapper", 0x24) != 6:                   # Yes/No + question icon
+                return
+            purge = _msgbox("Also delete your history and settings?\n\n(Choose No to keep them in case you reinstall.)", "Uninstall RamCapper", 0x24) == 6
+        try:
+            do_uninstall(purge)
+            if not silent:
+                _msgbox("RamCapper was uninstalled.")
+        except Exception as e:
+            _msgbox(f"Could not finish uninstalling:\n{e}", flags=0x10)
+        return
+    if not silent and _msgbox(f"Install RamCapper to\n{INSTALL_DIR}?", "Install RamCapper", 0x24) != 6:
+        return
+    try:
+        do_install(desktop="--no-desktop" not in argv, startup="--no-startup" not in argv)
+    except Exception as e:
+        _msgbox(f"Could not install RamCapper:\n{e}", flags=0x10)
+        if src_exe and os.path.exists(src_exe) and "--no-launch" not in argv:
+            subprocess.Popen(["explorer.exe", src_exe])                      # bring the portable copy back
+        return
+    if "--no-launch" not in argv:
+        subprocess.Popen(["explorer.exe", INSTALL_EXE])                     # explorer starts it without our elevation
+
+
 def retire_other_version():
     """If the copy already running is another version (e.g. an old exe left running), ask it to quit.
     Returns True when a quit request was accepted. Same-version copies are left alone (single instance)."""
@@ -3095,6 +3348,14 @@ def retire_other_version():
 
 
 def main():
+    if "--install" in sys.argv or "--uninstall" in sys.argv:
+        try:
+            with wlock:
+                wdb.close()                                     # release history.db so it can be copied / removed
+        except Exception:
+            pass
+        cli_installer()
+        return
     no_open = "--no-open" in sys.argv
     takeover = "--takeover" in sys.argv
     if "--admin" in sys.argv and not ADMIN:
