@@ -34,7 +34,7 @@ except Exception:
     except Exception:
         pass
 
-VERSION = "1.8.2"
+VERSION = "1.9.0"
 FROZEN = getattr(sys, "frozen", False)
 HERE = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))   # bundled resources
 APP_DIR = os.path.dirname(sys.executable) if FROZEN else os.path.dirname(os.path.abspath(__file__))
@@ -1417,7 +1417,7 @@ SAFE_EXE = re.compile(r"^[A-Za-z0-9._\- ()]{1,80}$")
 
 
 def _ps(script, timeout=40):
-    r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
+    r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
                        capture_output=True, text=True, timeout=timeout, creationflags=NOWIN)
     if r.returncode != 0:
         raise RuntimeError((r.stderr or r.stdout).strip().splitlines()[0] if (r.stderr or r.stdout).strip() else "PowerShell failed")
@@ -1770,8 +1770,8 @@ class Handler(BaseHTTPRequestHandler):
                     args = ["--install", "--silent", "--data", DATA_DIR, "--from", sys.executable]
                     if not body.get("desktop", True):
                         args.append("--no-desktop")
-                    if not body.get("startup", True):
-                        args.append("--no-startup")
+                    if body.get("startup", False):
+                        args.append("--startup")
                 else:
                     if not install_info()["installed"]:
                         return self._send(400, {"error": "RamCapper is not installed."})
@@ -1965,11 +1965,7 @@ def set_shortcut(where, on):
         target = pyw if os.path.exists(pyw) else sys.executable
         args = '"' + os.path.abspath(__file__) + '"'
         icon = os.path.join(HERE, "assets", "ramcapper.ico")
-    script = ("$s=(New-Object -ComObject WScript.Shell).CreateShortcut(%s);$s.TargetPath=%s;$s.Arguments=%s;$s.WorkingDirectory=%s;"
-              "$s.IconLocation=%s;$s.Description='RamCapper - RAM monitor and limiter';$s.Save()"
-              % (_psq(path), _psq(target), _psq(args), _psq(APP_DIR), _psq(icon)))
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    _ps(script)
+    _make_lnk(path, target, APP_DIR, icon, args)
 
 
 def open_window():
@@ -2037,9 +2033,8 @@ def focus_ui_window():
     hwnd = found[0]
     if user32.IsIconic(hwnd):
         user32.ShowWindow(hwnd, 9)                 # SW_RESTORE
-    user32.keybd_event(0x12, 0, 0, 0)              # tapping Alt lets SetForegroundWindow through
-    user32.keybd_event(0x12, 0, 2, 0)
-    user32.SetForegroundWindow(hwnd)
+    user32.SwitchToThisWindow.argtypes = [wintypes.HWND, wintypes.BOOL]
+    user32.SwitchToThisWindow(hwnd, True)           # the supported way to activate another app's window (no simulated key presses)
     return True
 
 
@@ -3145,22 +3140,32 @@ def _run_value():
         return None
 
 
+def startup_lnk():
+    return os.path.join(os.environ.get("APPDATA", ""), "Microsoft", "Windows", "Start Menu", "Programs", "Startup", "RamCapper.lnk")
+
+
+def startup_enabled():
+    return os.path.exists(startup_lnk()) or _run_value() is not None
+
+
 def set_startup(on, exe=None):
-    """Start RamCapper (hidden, in the tray) when you sign in to Windows."""
-    import winreg
-    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
-        if on:
-            if FROZEN or exe:
-                cmd = f'"{exe or sys.executable}" --no-open'
-            else:
-                pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
-                cmd = f'"{pyw if os.path.exists(pyw) else sys.executable}" "{os.path.abspath(__file__)}" --no-open'
-            winreg.SetValueEx(k, "RamCapper", 0, winreg.REG_SZ, cmd)
+    """Start RamCapper (hidden, in the tray) when you sign in to Windows: a shortcut in your Startup folder.
+    (Older versions used a Run registry entry; that is removed here.)"""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
+            winreg.DeleteValue(k, "RamCapper")
+    except OSError:
+        pass
+    if on:
+        if FROZEN or exe:
+            target, args, icon = exe or sys.executable, "--no-open", exe or sys.executable
         else:
-            try:
-                winreg.DeleteValue(k, "RamCapper")
-            except FileNotFoundError:
-                pass
+            pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+            target, args, icon = (pyw if os.path.exists(pyw) else sys.executable), f'"{os.path.abspath(__file__)}" --no-open', os.path.join(HERE, "assets", "ramcapper.ico")
+        _make_lnk(startup_lnk(), target, os.path.dirname(target), icon, args)
+    else:
+        _rm(startup_lnk())
 
 
 def _lnk_locations():
@@ -3170,15 +3175,51 @@ def _lnk_locations():
 
 
 def _make_lnk(path, target, workdir, icon, args=""):
+    """Create a .lnk with the Windows shell API (IShellLink / IPersistFile) - no PowerShell, no scripts."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    _ps("$s=(New-Object -ComObject WScript.Shell).CreateShortcut(%s);$s.TargetPath=%s;$s.Arguments=%s;$s.WorkingDirectory=%s;"
-        "$s.IconLocation=%s;$s.Description='RamCapper - RAM monitor and limiter';$s.Save()"
-        % (_psq(path), _psq(target), _psq(args), _psq(workdir), _psq(icon)))
+    ole32 = ctypes.OleDLL("ole32")
+
+    class GUID(ctypes.Structure):
+        _fields_ = [("a", ctypes.c_ulong), ("b", ctypes.c_ushort), ("c", ctypes.c_ushort), ("d", ctypes.c_ubyte * 8)]
+
+    def guid(text):
+        g = GUID()
+        ole32.CLSIDFromString(text, ctypes.byref(g))
+        return g
+
+    def method(obj, index, *argtypes):
+        vtbl = ctypes.cast(ctypes.cast(obj, ctypes.POINTER(ctypes.c_void_p))[0], ctypes.POINTER(ctypes.c_void_p))
+        fn = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, *argtypes)(vtbl[index])
+
+        def call(*a):
+            hr = fn(obj, *a)
+            if hr < 0:
+                raise OSError(f"shell link call failed (0x{hr & 0xFFFFFFFF:08X})")
+        return call
+
+    ole32.CoInitialize(None)
+    link, pf = ctypes.c_void_p(), ctypes.c_void_p()
+    try:
+        ole32.CoCreateInstance.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+        ole32.CoCreateInstance(ctypes.byref(guid("{00021401-0000-0000-C000-000000000046}")), None, 1,
+                               ctypes.byref(guid("{000214F9-0000-0000-C000-000000000046}")), ctypes.byref(link))
+        method(link, 20, wintypes.LPCWSTR)(target)                          # SetPath
+        method(link, 9, wintypes.LPCWSTR)(workdir)                          # SetWorkingDirectory
+        method(link, 11, wintypes.LPCWSTR)(args)                            # SetArguments
+        method(link, 7, wintypes.LPCWSTR)("RamCapper - RAM monitor and limiter")      # SetDescription
+        method(link, 17, wintypes.LPCWSTR, ctypes.c_int)(icon, 0)           # SetIconLocation
+        method(link, 0, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p))(ctypes.byref(guid("{0000010B-0000-0000-C000-000000000046}")), ctypes.byref(pf))   # QueryInterface(IPersistFile)
+        method(pf, 6, wintypes.LPCWSTR, wintypes.BOOL)(path, True)          # Save
+    finally:
+        for o in (pf, link):
+            if o:
+                method(o, 2)()                                              # Release
+        ole32.CoUninitialize()
 
 
 def install_info():
     return {"frozen": FROZEN, "dir": INSTALL_DIR, "installed": os.path.exists(INSTALL_EXE), "running_installed": is_installed_copy(),
-            "startup": _run_value() is not None, "version": VERSION}
+            "startup": startup_enabled(), "version": VERSION}
 
 
 def _msgbox(text, title="RamCapper", flags=0x40):
@@ -3205,7 +3246,7 @@ def _wait_instance_gone(timeout=20):
     return False
 
 
-def do_install(desktop=True, startup=True):
+def do_install(desktop=True, startup=False):
     if not FROZEN:
         raise RuntimeError("Installing is only available in the RamCapper.exe build.")
     _wait_instance_gone()
@@ -3281,9 +3322,8 @@ def do_uninstall(purge=False):
         shutil.rmtree(os.path.join(os.environ.get("APPDATA", ""), "RamCapper"), ignore_errors=True)
     if os.path.basename(INSTALL_DIR.rstrip("\\/")).lower() == "ramcapper" and os.path.isdir(INSTALL_DIR):
         # the running exe cannot delete itself: a detached helper removes the folder a few seconds after we exit
-        d = _psq(INSTALL_DIR)
-        subprocess.Popen(["powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command",
-                          f"Start-Sleep 2; for($i=0;$i -lt 30 -and (Test-Path -LiteralPath {d});$i++){{Remove-Item -LiteralPath {d} -Recurse -Force -ErrorAction SilentlyContinue;Start-Sleep 1}}"],
+        # (one command string, not an argument list, so cmd.exe sees the quotes around the path unchanged)
+        subprocess.Popen(f'cmd /d /c ping -n 3 127.0.0.1 >nul & rd /s /q "{INSTALL_DIR}" & ping -n 5 127.0.0.1 >nul & rd /s /q "{INSTALL_DIR}"',
                          creationflags=NOWIN | 0x00000200, close_fds=True)
 
 
@@ -3322,7 +3362,7 @@ def cli_installer():
     if not silent and _msgbox(f"Install RamCapper to\n{INSTALL_DIR}?", "Install RamCapper", 0x24) != 6:
         return
     try:
-        do_install(desktop="--no-desktop" not in argv, startup="--no-startup" not in argv)
+        do_install(desktop="--no-desktop" not in argv, startup="--startup" in argv)
     except Exception as e:
         _msgbox(f"Could not install RamCapper:\n{e}", flags=0x10)
         if src_exe and os.path.exists(src_exe) and "--no-launch" not in argv:
@@ -3382,6 +3422,14 @@ def main():
             return
         time.sleep(0.4)
     SERVER["srv"] = srv
+    try:                                   # older versions started with Windows through a Run registry entry: keep that setting, but as a Startup-folder shortcut
+        legacy = _run_value()
+        if legacy and not os.path.exists(startup_lnk()):
+            m = re.match(r'\s*"([^"]+)"', legacy)
+            if m and m.group(1).lower().endswith("ramcapper.exe") and os.path.exists(m.group(1)):
+                set_startup(True, exe=m.group(1))
+    except Exception:
+        pass
     atexit.register(release_caps)
     threading.Thread(target=sampler, daemon=True).start()
     if ADMIN:

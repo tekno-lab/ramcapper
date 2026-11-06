@@ -162,6 +162,17 @@ build.bat         one-command PyInstaller build
 run*.bat kill.bat launchers for the source version
 ```
 
+## Antivirus warnings
+
+`RamCapper.exe` is an **unsigned** program packaged with PyInstaller, and unsigned PyInstaller executables are a common source of antivirus *false positives*. RamCapper also does things monitoring tools legitimately do (trim and end other processes, read per-process network/GPU counters, optionally scan your LAN or add firewall rules), which some heuristics dislike. What it does to stay out of the way:
+
+- **Nothing is persistent unless you choose it.** "Start with Windows" and the installer are opt-in; auto-start is a normal shortcut in your Startup folder (no Run-registry entry), and it can be removed in Settings.
+- No UPX compression, no scripts with `ExecutionPolicy Bypass`, no hidden-window tricks, no simulated key presses; shortcuts are created with the Windows shell API.
+- The web UI only listens on `127.0.0.1`, and nothing is sent anywhere (no telemetry, no update checks).
+- The exe has proper file properties (company, description, version) and every release lists its SHA-256.
+
+If your antivirus still complains: check the SHA-256 in the release notes matches your download, read or build the source yourself (see *How to compile*), add an exclusion for the exe, and – best of all – report it as a false positive to your vendor (most have a web form). A code-signing certificate is the real long-term fix and is on the wishlist.
+
 ## License
 
 RamCapper is **source-available, free for non-commercial use**, under the [PolyForm Noncommercial License 1.0.0](LICENSE).
