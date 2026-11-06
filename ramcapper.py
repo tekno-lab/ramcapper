@@ -2263,7 +2263,8 @@ def _argb(r, g, b, a=255):
 
 
 PILL_COL = {"bg": _argb(9, 11, 16), "text": _argb(232, 238, 246), "muted": _argb(135, 148, 167), "ok": _argb(52, 195, 143),
-            "warn": _argb(242, 180, 65), "bad": _argb(239, 106, 100), "accent": _argb(110, 160, 255), "line": _argb(60, 72, 92)}
+            "warn": _argb(242, 180, 65), "bad": _argb(239, 106, 100), "accent": _argb(110, 160, 255), "line": _argb(60, 72, 92),
+            "gpu": _argb(190, 130, 255)}
 
 
 def _pill_fmt_rate(b):
@@ -2288,23 +2289,82 @@ def _pill_items():
         g = dict(CFG.get("global", {}))
     limit = g.get("threshold", 90) if g.get("enabled") else 90
     level = "bad" if pct >= limit else ("warn" if pct >= 70 else "ok")
-    cpu = psutil.cpu_percent(None)
-    items = [("dot", PILL_COL[level]), ("text", f"{pct:.0f}%", "text", True),
+    cpu = psutil.cpu_percent(None)                     # whole machine (all cores), not a single process
+    items = [("icon", "ram", PILL_COL[level]), ("text", f"{pct:.0f}%", "text", True),
              ("text", f"{s['used'] / GB_:.1f} / {s['total'] / GB_:.1f} GB", "muted", False),
-             ("spark", PILL_COL[level]), ("sep",), ("text", "CPU ", "muted", False), ("text", f"{cpu:.0f}%", "text", True)]
-    if module_on("network") and Net.rate:
-        _, d, u = Net.rate[-1]
-        items += [("sep",), ("text", "↓ ", "accent", True), ("text", _pill_fmt_rate(d), "text", False),
-                  ("text", "  ↑ ", "warn", True), ("text", _pill_fmt_rate(u), "text", False)]
+             ("spark", PILL_COL[level]), ("sep",),
+             ("icon", "cpu", PILL_COL["accent"]), ("text", "CPU ", "muted", False), ("text", f"{cpu:.0f}%", "text", True)]
+    gpu = PILL.get("gpu")
+    if gpu is not None:
+        items += [("sep",), ("icon", "gpu", PILL_COL["gpu"]), ("text", "GPU ", "muted", False), ("text", f"{gpu:.0f}%", "text", True)]
+    net = PILL.get("net")
+    if net:
+        items += [("sep",), ("icon", "down", PILL_COL["ok"]), ("text", _pill_fmt_rate(net[0]), "text", False),
+                  ("icon", "up", PILL_COL["warn"]), ("text", _pill_fmt_rate(net[1]), "text", False)]
     items.append(("sep",))
     txt, until = PILL["flash"]
     if txt and time.time() < until:
-        items.append(("text", "⚡ " + txt, "accent", True))
+        items.append(("text", "\u26a1 " + txt, "accent", True))
     elif apps:
         top = max(apps, key=lambda a: a["rss"])
         items += [("dot", _pill_app_color(top["name"])), ("text", top["name"], "text", False),
                   ("text", f"  {top['rss'] / GB_:.1f} GB" if top["rss"] >= GB_ else f"  {top['rss'] / MB_:.0f} MB", "muted", False)]
     return items, level, pct >= limit
+
+
+def _gpu_loop():
+    """Total GPU utilisation from the Windows "GPU Engine" performance counters (any vendor). Like Task Manager, the busiest
+    engine type (3D, Copy, Video…) of the busiest adapter is the figure shown."""
+    pdh = ctypes.WinDLL("pdh")
+
+    class VAL(ctypes.Structure):
+        _fields_ = [("status", wintypes.DWORD), ("v", ctypes.c_double)]
+
+    class ITEM(ctypes.Structure):
+        _fields_ = [("name", wintypes.LPWSTR), ("val", VAL)]
+
+    PV = ctypes.c_void_p
+    pdh.PdhOpenQueryW.argtypes = [wintypes.LPCWSTR, PV, ctypes.POINTER(PV)]
+    pdh.PdhAddEnglishCounterW.argtypes = [PV, wintypes.LPCWSTR, PV, ctypes.POINTER(PV)]
+    pdh.PdhCollectQueryData.argtypes = [PV]
+    pdh.PdhCloseQuery.argtypes = [PV]
+    pdh.PdhGetFormattedCounterArrayW.argtypes = [PV, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD), PV]
+    rx = re.compile(r"luid_(0x[0-9a-fA-F]+_0x[0-9a-fA-F]+)_phys_\d+_eng_\d+_engtype_(\w+)")
+    q = c = None
+    born = 0.0
+    while True:
+        try:
+            if q is None or time.time() - born > 30:          # re-enumerate now and then: processes (and their engines) come and go
+                if q:
+                    pdh.PdhCloseQuery(q)
+                q, c = PV(), PV()
+                if pdh.PdhOpenQueryW(None, None, ctypes.byref(q)) or \
+                        pdh.PdhAddEnglishCounterW(q, "\\GPU Engine(*)\\Utilization Percentage", None, ctypes.byref(c)):
+                    q = None
+                    PILL["gpu"] = None
+                    time.sleep(60)                              # no GPU counters on this machine
+                    continue
+                born = time.time()
+                pdh.PdhCollectQueryData(q)
+                time.sleep(1.0)
+            pdh.PdhCollectQueryData(q)
+            size, count = wintypes.DWORD(0), wintypes.DWORD(0)
+            pdh.PdhGetFormattedCounterArrayW(c, 0x200, ctypes.byref(size), ctypes.byref(count), None)     # PDH_FMT_DOUBLE; asks for the size
+            if size.value:
+                buf = ctypes.create_string_buffer(size.value)
+                if pdh.PdhGetFormattedCounterArrayW(c, 0x200, ctypes.byref(size), ctypes.byref(count), buf) == 0:
+                    arr = ctypes.cast(buf, ctypes.POINTER(ITEM))
+                    tot = {}
+                    for k in range(count.value):
+                        it = arr[k]
+                        m = rx.search(it.name or "")
+                        if m and it.val.status in (0, 0x00000001):
+                            tot[m.groups()] = tot.get(m.groups(), 0.0) + it.val.v
+                    PILL["gpu"] = min(100.0, max(tot.values())) if tot else 0.0
+        except Exception as ex:
+            print("gpu error:", ex, file=sys.stderr)
+            PILL["gpu"] = None
+        time.sleep(1.0)
 
 
 class _GpRectF(ctypes.Structure):
@@ -2339,6 +2399,8 @@ def _pill_thread():
         "GdipCreateSolidFill": [U, PP(PV)], "GdipDeleteBrush": [PV], "GdipCreatePen1": [U, F, I, PP(PV)], "GdipDeletePen": [PV],
         "GdipSetPenLineCap197819": [PV, I, I, I], "GdipSetPenLineJoin": [PV, I], "GdipSetCompositingQuality": [PV, I],
         "GdipFillPath": [PV, PV, PV], "GdipDrawPath": [PV, PV, PV], "GdipFillEllipse": [PV, PV, F, F, F, F],
+        "GdipDrawEllipse": [PV, PV, F, F, F, F], "GdipDrawRectangle": [PV, PV, F, F, F, F], "GdipFillRectangle": [PV, PV, F, F, F, F],
+        "GdipDrawLines": [PV, PV, PV, I],
         "GdipDrawLine": [PV, PV, F, F, F, F], "GdipDrawCurve": [PV, PV, PV, I],
         "GdipCreateFontFamilyFromName": [wintypes.LPCWSTR, PV, PP(PV)], "GdipCreateFont": [PV, F, I, I, PP(PV)],
         "GdipStringFormatGetGenericTypographic": [PP(PV)], "GdipCloneStringFormat": [PV, PP(PV)],
@@ -2419,6 +2481,44 @@ def _pill_thread():
 
     st = {"dib": None, "bmp": None, "g": None, "W": 0, "H": 0}
 
+    def draw_icon(g, kind, x, cy, s, col):
+        """Small vector icons (RAM stick, CPU chip, graphics card, down/up arrows), anti-aliased like everything else."""
+        pw = max(1.3, 1.5 * scale)
+        p = pen(col, pw)
+        b = brush(col)
+        L = lambda x1, y1, x2, y2: gp.GdipDrawLine(g, p, F(x1), F(y1), F(x2), F(y2))
+        if kind == "ram":                                            # memory module: body, three chips, pins
+            gp.GdipDrawRectangle(g, p, F(x), F(cy - s * 0.30), F(s), F(s * 0.52))
+            for k in range(3):
+                gp.GdipFillRectangle(g, b, F(x + s * (0.17 + 0.28 * k)), F(cy - s * 0.15), F(s * 0.16), F(s * 0.22))
+            for k in range(4):
+                L(x + s * (0.14 + 0.24 * k), cy + s * 0.26, x + s * (0.14 + 0.24 * k), cy + s * 0.42)
+        elif kind == "cpu":                                          # processor: square die with pins on all sides
+            q = s * 0.56
+            gp.GdipDrawRectangle(g, p, F(x + (s - q) / 2), F(cy - q / 2), F(q), F(q))
+            gp.GdipFillRectangle(g, b, F(x + s / 2 - s * 0.12), F(cy - s * 0.12), F(s * 0.24), F(s * 0.24))
+            for d in (-0.14, 0.14):
+                L(x + s / 2 + s * d, cy - q / 2, x + s / 2 + s * d, cy - q / 2 - s * 0.16)
+                L(x + s / 2 + s * d, cy + q / 2, x + s / 2 + s * d, cy + q / 2 + s * 0.16)
+                L(x + (s - q) / 2, cy + s * d, x + (s - q) / 2 - s * 0.16, cy + s * d)
+                L(x + (s + q) / 2, cy + s * d, x + (s + q) / 2 + s * 0.16, cy + s * d)
+        elif kind == "gpu":                                          # graphics card: board, fan, bracket
+            gp.GdipDrawRectangle(g, p, F(x), F(cy - s * 0.30), F(s), F(s * 0.52))
+            gp.GdipDrawEllipse(g, p, F(x + s * 0.50), F(cy - s * 0.20), F(s * 0.32), F(s * 0.32))
+            gp.GdipFillRectangle(g, b, F(x + s * 0.14), F(cy - s * 0.12), F(s * 0.20), F(s * 0.16))
+            L(x + s * 0.08, cy + s * 0.22, x + s * 0.08, cy + s * 0.44)
+        elif kind in ("down", "up"):                                 # network arrows
+            t, bt, hh = cy - s * 0.42, cy + s * 0.42, s * 0.28
+            cx = x + s / 2
+            if kind == "up":
+                t, bt = bt, t
+                hh = -hh
+            L(cx, t, cx, bt)
+            pts = (_GpPointF * 3)(_GpPointF(cx - s * 0.30, bt - hh), _GpPointF(cx, bt), _GpPointF(cx + s * 0.30, bt - hh))
+            gp.GdipDrawLines(g, p, pts, 3)
+        gp.GdipDeletePen(p)
+        gp.GdipDeleteBrush(b)
+
     def free_frame():
         if st["g"]:
             gp.GdipDeleteGraphics(st["g"])
@@ -2434,7 +2534,8 @@ def _pill_thread():
         H, m, r = S_(36), S_(2), S_(16)                             # height, margin for the rim, bottom corner radius
         e = m
         padx, gap, sep = S_(16), S_(9), S_(13)
-        widths = [S_(9) if it[0] == "dot" else S_(60) if it[0] == "spark" else sep if it[0] == "sep" else measure(it[1], it[3]) for it in items]
+        widths = [S_(9) if it[0] == "dot" else S_(15) if it[0] == "icon" else S_(60) if it[0] == "spark" else sep if it[0] == "sep"
+                  else measure(it[1], it[3]) for it in items]
         W = max(S_(140), 2 * e + 2 * padx + sum(widths) + gap * (len(items) - 1))
         bi = _BMIH(ctypes.sizeof(_BMIH), W, -H, 1, 32, 0, 0, 0, 0, 0, 0)
         bits = PV()
@@ -2495,6 +2596,8 @@ def _pill_thread():
                 b = brush(it[1])
                 gp.GdipFillEllipse(g, b, F(pts[-1].x - S_(2)), F(pts[-1].y - S_(2)), F(S_(4)), F(S_(4)))
                 gp.GdipDeleteBrush(b)
+            elif k == "icon":
+                draw_icon(g, it[1], x, H / 2.0, float(w), it[2])
             elif k == "sep":
                 p = pen(PILL_COL["line"], 1.0 * scale)
                 gp.GdipDrawLine(g, p, F(x + w / 2), F(S_(10)), F(x + w / 2), F(H - S_(10)))
@@ -2554,6 +2657,17 @@ def _pill_thread():
 
     def on_tick(hwnd):
         PILL["tick"] += 1
+        try:
+            io, now_t = psutil.net_io_counters(), time.time()
+            last = PILL.get("netlast")
+            if last:
+                dt = max(0.2, now_t - last[0])
+                d, u = max(0, io.bytes_recv - last[1]) / dt, max(0, io.bytes_sent - last[2]) / dt
+                old = PILL.get("net") or (d, u)
+                PILL["net"] = (old[0] * 0.4 + d * 0.6, old[1] * 0.4 + u * 0.6)      # light smoothing so it doesn't flicker
+            PILL["netlast"] = (now_t, io.bytes_recv, io.bytes_sent)
+        except Exception:
+            pass
         if PILL["tick"] % 2 == 0:                                    # one history sample per second
             with ST.lock:
                 p = ST.sysinfo.get("percent")
@@ -2644,6 +2758,7 @@ def start_minibar():
     user32.LoadCursorW.argtypes = [VP, VP]
     user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
     threading.Thread(target=_pill_thread, daemon=True).start()
+    threading.Thread(target=_gpu_loop, daemon=True).start()
 
 
 def retire_other_version():
