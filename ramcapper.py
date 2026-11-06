@@ -34,7 +34,7 @@ except Exception:
     except Exception:
         pass
 
-VERSION = "1.9.2"
+VERSION = "1.9.3"
 FROZEN = getattr(sys, "frozen", False)
 HERE = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))   # bundled resources
 APP_DIR = os.path.dirname(sys.executable) if FROZEN else os.path.dirname(os.path.abspath(__file__))
@@ -254,7 +254,8 @@ def load_cfg():
         c.setdefault("netrules", [])
         c.setdefault("minibar", "minimized")
         c.setdefault("notch_side", "bottom")
-        c.setdefault("first_run_done", True)             # an existing config means this is not the first run
+        c.setdefault("first_run_done", True)
+        c.setdefault("window_maximized", True)           # open the dashboard window maximized (Settings can turn this off)
         return c
     except Exception:
         return json.loads(json.dumps(DEFAULT_CFG))
@@ -1744,7 +1745,7 @@ class Handler(BaseHTTPRequestHandler):
                 except OSError:
                     size = 0
                 return self._send(200, {"admin": ADMIN, "data_dir": DATA_DIR, "data_source": DATA_SOURCE, "app_dir": APP_DIR,
-                                        "db_size": size, "frozen": FROZEN, "port": PORT, "version": VERSION, "minibar": pill_mode(), "notch_side": pill_side(),
+                                        "db_size": size, "frozen": FROZEN, "port": PORT, "version": VERSION, "minibar": pill_mode(), "notch_side": pill_side(), "window_maximized": bool(CFG.get("window_maximized", True)),
                                         "install": install_info()})
             if u.path == "/api/install":
                 return self._send(200, install_info())
@@ -1791,6 +1792,7 @@ class Handler(BaseHTTPRequestHandler):
                     new["minibar"] = CFG.get("minibar", "minimized")
                     new["notch_side"] = CFG.get("notch_side", "bottom")
                     new["first_run_done"] = CFG.get("first_run_done", True)
+                    new["window_maximized"] = CFG.get("window_maximized", True)
                     CFG = new
                     save_cfg()
                 return self._send(200, new)
@@ -1843,6 +1845,11 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as e:
                     return self._send(400, {"error": str(e)})
                 return self._send(200, install_info())
+            if path == "/api/window":
+                with cfg_lock:
+                    CFG["window_maximized"] = bool(body.get("maximized"))
+                    save_cfg()
+                return self._send(200, {"window_maximized": CFG["window_maximized"]})
             if path == "/api/minibar":
                 if body.get("preview"):
                     PILL["preview"] = time.time() + 6
@@ -2035,7 +2042,9 @@ def _maximize_when_ready():
             return
 
 
-def open_window(maximized=False):
+def open_window(maximized=None):
+    if maximized is None:
+        maximized = bool(CFG.get("window_maximized", True))
     url = f"http://127.0.0.1:{PORT}/"
     for exe in (shutil.which("msedge"),
                 r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
@@ -3511,12 +3520,7 @@ def main():
         start_tray(first_balloon=not no_open and not takeover)
     start_minibar()
     if not no_open:
-        with cfg_lock:
-            first = not CFG.get("first_run_done")
-            if first:                                  # the very first window opens maximized; later ones use the normal size
-                CFG["first_run_done"] = True
-                save_cfg()
-        threading.Timer(1.0, lambda: open_window(maximized=first)).start()
+        threading.Timer(1.0, open_window).start()
     print(f"RamCapper running on http://127.0.0.1:{PORT}  (admin={ADMIN})")
     try:
         srv.serve_forever()

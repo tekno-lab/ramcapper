@@ -48,6 +48,9 @@
     </div>
   </div>
   <section class="card">
+    <div class="row"><div class="grow"><h3>Dashboard window</h3><div class="sub">Open the dashboard maximized every time it starts or is reopened from the tray. Turn this off to use a normal-sized window.</div></div><label class="sw"><input type="checkbox" id="win-max"><s></s></label></div>
+  </section>
+  <section class="card">
     <div class="row"><div class="grow"><h3>Notch stats bar</h3><div class="sub">A one-line notch that hangs from the top edge of your screen with live RAM, total CPU, GPU, download and upload speed and your biggest app. Click it to bring the dashboard back; right-click for a menu. It pulses red when memory is critical and flashes limiter actions.</div></div></div>
     <div class="row" style="margin-top:14px;gap:10px;flex-wrap:wrap">
       <select id="mb-mode"><option value="minimized">Show when the window is minimized</option><option value="hidden">Show whenever the window isn't on screen (minimized or closed)</option><option value="always">Always show</option><option value="off">Off</option></select>
@@ -87,6 +90,7 @@ window.onInfo=i=>{
   $('#inst-admin').classList.toggle('hide',i.admin);
   $('#inst-admin-sub').innerHTML=i.admin?'<span class="st on"><i></i>Running as administrator</span>':'Restart RamCapper with administrator rights (Windows asks for permission).';
   showInstall(i.install);
+  $('#win-max').checked=i.window_maximized!==false;
   if(document.activeElement!==$('#mb-mode'))$('#mb-mode').value=i.minibar||'minimized';
   if(document.activeElement!==$('#mb-side'))$('#mb-side').value=i.notch_side||'bottom';
   $('#i-dir').textContent=i.data_dir;$('#i-meta').textContent=`history.db ${fmtB(i.db_size)}`;
@@ -99,6 +103,7 @@ window.onInfo=i=>{
     .map(([k,v])=>`<span>${k}</span><span style="word-break:break-all">${esc(v)}</span>`).join('');
 };
 $('#i-elev').onclick=elevate;$('#inst-admin').onclick=elevate;
+$('#win-max').onchange=async e=>{try{await api('/api/window',{maximized:e.target.checked});toast(e.target.checked?'The window will open maximized':'The window will open at normal size')}catch(x){toast(x.message);e.target.checked=!e.target.checked}};
 $('#inst-go').onclick=async()=>{
   const n=S.info.install;
   if(!confirm((n.installed?'Update the installed copy at ':'Install RamCapper to ')+n.dir+'?\n\nWindows will ask for permission. RamCapper restarts from the installed copy and your history is kept.'))return;
