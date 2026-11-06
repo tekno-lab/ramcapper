@@ -34,7 +34,7 @@ except Exception:
     except Exception:
         pass
 
-VERSION = "1.9.3"
+VERSION = "1.9.4"
 FROZEN = getattr(sys, "frozen", False)
 HERE = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))   # bundled resources
 APP_DIR = os.path.dirname(sys.executable) if FROZEN else os.path.dirname(os.path.abspath(__file__))
@@ -252,7 +252,11 @@ def load_cfg():
         c.setdefault("global", dict(DEFAULT_CFG["global"]))
         c.setdefault("modules", dict(DEFAULT_CFG["modules"]))
         c.setdefault("netrules", [])
-        c.setdefault("minibar", "minimized")
+        c.setdefault("minibar", "hidden")
+        if c.get("minibar_v") != 2:                      # one-time: the old default "only when minimized" -> "whenever the window is hidden"
+            if c.get("minibar") == "minimized":
+                c["minibar"] = "hidden"
+            c["minibar_v"] = 2
         c.setdefault("notch_side", "bottom")
         c.setdefault("first_run_done", True)
         c.setdefault("window_maximized", True)           # open the dashboard window maximized (Settings can turn this off)
@@ -1664,12 +1668,14 @@ def drives():
 SERVER = {}
 
 
-def quit_app():
-    """Release hard caps, flush the DB and exit the whole process."""
-    try:
-        close_ui_window()                      # the dashboard window goes away with the app
-    except Exception:
-        pass
+def quit_app(close_window=True):
+    """Release hard caps, flush the DB and exit the whole process. A restart passes close_window=False: the window stays
+    open showing "restarting…" and reloads itself as soon as the new copy answers."""
+    if close_window:
+        try:
+            close_ui_window()                  # the dashboard window goes away with the app
+        except Exception:
+            pass
     try:
         tray_remove()
         bw_stop()
@@ -1789,7 +1795,8 @@ class Handler(BaseHTTPRequestHandler):
                 with cfg_lock:
                     new["modules"] = CFG.get("modules", dict(DEFAULT_CFG["modules"]))
                     new["netrules"] = CFG.get("netrules", [])
-                    new["minibar"] = CFG.get("minibar", "minimized")
+                    new["minibar"] = CFG.get("minibar", "hidden")
+                    new["minibar_v"] = 2
                     new["notch_side"] = CFG.get("notch_side", "bottom")
                     new["first_run_done"] = CFG.get("first_run_done", True)
                     new["window_maximized"] = CFG.get("window_maximized", True)
@@ -1947,7 +1954,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not relaunch_elevated(["--takeover", "--no-open"]):   # blocks on the UAC prompt
                     return self._send(400, {"error": "Administrator permission was not granted"})
                 self._send(200, {"ok": True})
-                threading.Timer(0.5, quit_app).start()
+                threading.Timer(0.5, lambda: quit_app(False)).start()
                 return
             if path == "/api/relocate":
                 if DATA_SOURCE in ("arg", "env"):
@@ -2239,7 +2246,7 @@ def relocate(path):
 def restart_into(fn):
     """Spawn the replacement copy, then exit; the new copy waits (--takeover) until this one has gone."""
     fn()
-    threading.Timer(0.5, quit_app).start()
+    threading.Timer(0.5, lambda: quit_app(False)).start()
 
 
 # ---------------------------------------------------------------- tray icon (notification area)
@@ -2377,8 +2384,8 @@ GB_ = 1073741824
 
 
 def pill_mode():
-    m = CFG.get("minibar", "minimized")
-    return m if m in PILL_MODES else "minimized"
+    m = CFG.get("minibar", "hidden")
+    return m if m in PILL_MODES else "hidden"
 
 
 PILL_SIDES = ("top", "bottom", "left", "right")

@@ -53,7 +53,7 @@
   <section class="card">
     <div class="row"><div class="grow"><h3>Notch stats bar</h3><div class="sub">A one-line notch that hangs from the top edge of your screen with live RAM, total CPU, GPU, download and upload speed and your biggest app. Click it to bring the dashboard back; right-click for a menu. It pulses red when memory is critical and flashes limiter actions.</div></div></div>
     <div class="row" style="margin-top:14px;gap:10px;flex-wrap:wrap">
-      <select id="mb-mode"><option value="minimized">Show when the window is minimized</option><option value="hidden">Show whenever the window isn't on screen (minimized or closed)</option><option value="always">Always show</option><option value="off">Off</option></select>
+      <select id="mb-mode"><option value="hidden">Show whenever the window isn't on screen (minimized or closed)</option><option value="minimized">Show only when the window is minimized</option><option value="always">Always show</option><option value="off">Off</option></select>
       <select id="mb-side"><option value="top">Position: top</option><option value="bottom">Position: bottom (above the taskbar)</option><option value="left">Position: left</option><option value="right">Position: right</option></select>
       <button class="btn sm" id="mb-preview">Preview for 6 s</button>
     </div>
@@ -91,7 +91,7 @@ window.onInfo=i=>{
   $('#inst-admin-sub').innerHTML=i.admin?'<span class="st on"><i></i>Running as administrator</span>':'Restart RamCapper with administrator rights (Windows asks for permission).';
   showInstall(i.install);
   $('#win-max').checked=i.window_maximized!==false;
-  if(document.activeElement!==$('#mb-mode'))$('#mb-mode').value=i.minibar||'minimized';
+  if(document.activeElement!==$('#mb-mode'))$('#mb-mode').value=i.minibar||'hidden';
   if(document.activeElement!==$('#mb-side'))$('#mb-side').value=i.notch_side||'bottom';
   $('#i-dir').textContent=i.data_dir;$('#i-meta').textContent=`history.db ${fmtB(i.db_size)}`;
   const fixed=i.data_source==='arg'||i.data_source==='env';
