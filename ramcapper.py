@@ -34,7 +34,7 @@ except Exception:
     except Exception:
         pass
 
-VERSION = "1.9.1"
+VERSION = "1.9.2"
 FROZEN = getattr(sys, "frozen", False)
 HERE = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))   # bundled resources
 APP_DIR = os.path.dirname(sys.executable) if FROZEN else os.path.dirname(os.path.abspath(__file__))
@@ -312,7 +312,58 @@ class State:
 ST = State()
 
 
+# RamCapper's dashboard is drawn by a browser (Edge/Chrome app window), so some msedge.exe / chrome.exe processes are "ours".
+# The process that owns the dashboard window is found through the window itself. If that browser has no other visible window the
+# whole process tree is RamCapper's ("dedicated" - Kill skips it); otherwise the browser is shared with your normal windows
+# ("shared" - ending it would close the dashboard too, so the UI warns).
+UI_OWNED = {}          # pid -> "shared" (browser process that also hosts the dashboard) | "dedicated" | "child"
+
+
+def ui_hosts():
+    """pid -> "dedicated" | "shared" for the browser processes that own a RamCapper dashboard window."""
+    PROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    wins = []
+
+    def cb(hwnd, _):
+        if user32.IsWindowVisible(hwnd):
+            n = user32.GetWindowTextLengthW(hwnd)
+            if 0 < n < 200:
+                cls = ctypes.create_unicode_buffer(64)
+                user32.GetClassNameW(hwnd, cls, 64)
+                if cls.value == "Chrome_WidgetWin_1":
+                    buf = ctypes.create_unicode_buffer(n + 1)
+                    user32.GetWindowTextW(hwnd, buf, n + 1)
+                    pid = wintypes.DWORD()
+                    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                    wins.append((pid.value, buf.value))
+        return True
+
+    try:
+        user32.EnumWindows.argtypes = [PROC, wintypes.LPARAM]
+        user32.IsWindowVisible.argtypes = [wintypes.HWND]
+        user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+        user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        user32.EnumWindows(PROC(cb), 0)
+    except Exception:
+        return {}
+    ours = {pid for pid, t in wins if t == "RamCapper" or t.endswith("\u00b7 RamCapper")}
+    return {pid: ("shared" if any(pp == pid and t not in ("RamCapper",) and not t.endswith("\u00b7 RamCapper") for pp, t in wins) else "dedicated")
+            for pid in ours}
+
+
 def collect():
+    global UI_OWNED
+    owned = {}
+    for pid, mode in ui_hosts().items():
+        owned[pid] = "shared" if mode == "shared" else "dedicated"
+        if mode == "dedicated":
+            try:
+                for ch in psutil.Process(pid).children(recursive=True):
+                    owned[ch.pid] = "child"
+            except psutil.Error:
+                pass
+    UI_OWNED = owned
     apps = {}
     for p in psutil.process_iter(["pid", "name", "memory_info"]):
         try:
@@ -323,7 +374,10 @@ def collect():
             name = (p.info["name"] or f"pid {pid}").lower()
             a = apps.get(name)
             if a is None:
-                a = apps[name] = {"name": name, "rss": 0, "private": 0, "pids": []}
+                a = apps[name] = {"name": name, "rss": 0, "private": 0, "pids": [], "ui": 0, "ui_shared": False}
+            if pid in owned:
+                a["ui"] += 1
+                a["ui_shared"] = a["ui_shared"] or owned[pid] == "shared"
             a["rss"] += mi.rss
             a["private"] += getattr(mi, "private", mi.rss)
             a["pids"].append((pid, mi.rss))
@@ -361,8 +415,8 @@ def kill_procs(pids):
     killed = 0
     me = os.getpid()
     for pid in pids:
-        if pid == me or pid in (0, 4):
-            continue
+        if pid == me or pid in (0, 4) or UI_OWNED.get(pid) in ("dedicated", "child"):
+            continue                         # RamCapper's own dashboard window (when it has its own browser) is never ended
         try:
             p = psutil.Process(pid)
             if p.name().lower() in PROTECTED:
@@ -706,7 +760,7 @@ def now_payload():
             vals = [v for _, v in dq[-60:]]
             step = max(1, len(vals) // 30)
             out.append({"name": a["name"], "rss": a["rss"], "private": a["private"], "procs": len(a["pids"]),
-                        "d5": a["rss"] - past, "spark": vals[::step],
+                        "d5": a["rss"] - past, "spark": vals[::step], "ui": a.get("ui", 0), "ui_shared": a.get("ui_shared", False),
                         "protected": a["name"] in PROTECTED or a["name"] == SELF_NAME})
     with cfg_lock:
         rules = list(CFG["rules"])
@@ -723,7 +777,7 @@ def app_detail(name):
             mi = p.info["memory_info"]
             cmd = " ".join(p.info["cmdline"] or [])[:160]
             procs.append({"pid": p.info["pid"], "rss": mi.rss, "private": getattr(mi, "private", mi.rss),
-                          "started": p.info["create_time"], "cmd": cmd, "capped": p.info["pid"] in ST.capped})
+                          "started": p.info["create_time"], "cmd": cmd, "capped": p.info["pid"] in ST.capped, "ui": UI_OWNED.get(p.info["pid"])})
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
     procs.sort(key=lambda p: p["rss"], reverse=True)

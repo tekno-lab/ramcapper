@@ -77,9 +77,10 @@ function renderGauge(s){
   $('#s-used').textContent=fmtB(s.used);$('#s-avail').textContent=fmtB(s.avail);
   $('#s-commit').textContent=fmtB(s.commit_used)+' / '+fmtB(s.commit_limit);
 }
+const uiBadge=a=>a.ui?`<span class="badge ours" title="${a.ui_shared?`${a.ui} process(es) here draw RamCapper's own window – this browser is shared with your other windows`:`${a.ui} process(es) here are RamCapper's own window (kept safe from Kill)`}">${a.ui_shared?'hosts RamCapper window':'RamCapper window'}</span>`:'';
 let appMax=1;
 const appsDT=DataTable($('#apps-t'),{key:'apps',sort:'mem',dir:-1,empty:'No matching apps',cols:[
-  {id:'app',label:'App',fixed:true,val:r=>r.name,first:'asc',render:a=>`<div class="name" data-open="${esc(a.name)}"><i class="dot" style="background:${colorOf(a.name)}"></i>${icon(a.name)}<b>${esc(a.name)}</b><span class="sub">${a.procs>1?a.procs+' procs':''}</span></div>`},
+  {id:'app',label:'App',fixed:true,val:r=>r.name,first:'asc',render:a=>`<div class="name" data-open="${esc(a.name)}"><i class="dot" style="background:${colorOf(a.name)}"></i>${icon(a.name)}<b>${esc(a.name)}</b><span class="sub">${a.procs>1?a.procs+' procs':''}</span>${uiBadge(a)}</div>`},
   {id:'mem',label:'Memory',w:'200px',val:r=>r.rss,render:a=>`${fmtB(a.rss)}<div class="bar"><i style="width:${a.rss/appMax*100}%;background:${colorOf(a.name)}"></i></div>`},
   {id:'d5',label:'Δ 5 min',th:'r',td:'r',val:r=>r.d5,menu:'Change in 5 minutes',cls:a=>a.d5>20*MB?'up':a.d5<-20*MB?'down':'flat',render:a=>fmtD(a.d5)},
   {id:'trend',label:'Trend',render:a=>{const sp=a.spark,mx=Math.max(1,...sp),mn=Math.min(...sp);
@@ -88,7 +89,7 @@ const appsDT=DataTable($('#apps-t'),{key:'apps',sort:'mem',dir:-1,empty:'No matc
   {id:'private',label:'Private',th:'r',td:'r',val:r=>r.private,off:true,render:a=>fmtB(a.private)},
   {id:'procs',label:'Processes',th:'r',td:'r',val:r=>r.procs,off:true,render:a=>a.procs},
   {id:'limit',label:'Limit',render:a=>ruleFor(a.name).map(r=>`<a class="pill ${r.enabled?'':'off'}" href="/limiter.html" title="Edit in Limiter">${r.limit_mb>=1024?(r.limit_mb/1024).toFixed(r.limit_mb%1024?1:0)+' GB':r.limit_mb+' MB'} · ${ACTL[r.action]}</a>`).join(' ')},
-  {id:'act',label:'Actions',th:'r',td:'r',fixed:true,render:a=>`<button class="btn sm" data-trim="${esc(a.name)}">Trim</button> <button class="btn sm" data-limit="${esc(a.name)}">Limit</button>${a.protected?'':` <button class="btn sm danger" data-kill="${esc(a.name)}" data-procs="${a.procs}" title="End all ${a.procs} process(es) of ${esc(a.name)}">Kill</button>`}`},
+  {id:'act',label:'Actions',th:'r',td:'r',fixed:true,render:a=>`<button class="btn sm" data-trim="${esc(a.name)}">Trim</button> <button class="btn sm" data-limit="${esc(a.name)}">Limit</button>${a.protected?'':` <button class="btn sm danger" data-kill="${esc(a.name)}" data-procs="${a.procs}" data-ui="${a.ui?(a.ui_shared?2:1):0}" title="End all ${a.procs} process(es) of ${esc(a.name)}">Kill</button>`}`},
 ]});
 function renderApps(){
   const n=S.now;if(!n)return;
@@ -102,8 +103,8 @@ function renderDrawer(det){
   $('#d-name').textContent=S.open;
   $('#d-sub').textContent=a?`${fmtB(a.rss)} working set · ${fmtB(a.private)} private · ${a.procs} process${a.procs>1?'es':''}`:'not running';
   if(det){
-    $('#d-procs').innerHTML=det.procs.map(p=>`<tr><td>${p.pid}${p.capped?' <span class="pill">capped</span>':''}<div class="cmd" title="${esc(p.cmd)}">${esc(p.cmd)}</div></td><td class="r">${fmtB(p.rss)}</td><td class="r">${fmtB(p.private)}</td>
-      <td class="r"><button class="btn sm" data-tp="${p.pid}">Trim</button> ${det.protected?'':`<button class="btn sm danger" data-kp="${p.pid}">End</button>`}</td></tr>`).join('');
+    $('#d-procs').innerHTML=det.procs.map(p=>`<tr><td>${p.pid}${p.capped?' <span class="pill">capped</span>':''}${p.ui?` <span class="badge ours" title="${p.ui==='shared'?'This browser process draws RamCapper\'s own window (and also your other browser windows)':'Part of the browser that draws RamCapper\'s own window'}">RamCapper window</span>`:''}<div class="cmd" title="${esc(p.cmd)}">${esc(p.cmd)}</div></td><td class="r">${fmtB(p.rss)}</td><td class="r">${fmtB(p.private)}</td>
+      <td class="r"><button class="btn sm" data-tp="${p.pid}">Trim</button> ${det.protected?'':`<button class="btn sm danger" data-kp="${p.pid}" data-ui="${p.ui?1:0}">End</button>`}</td></tr>`).join('');
     $('#d-kill').classList.toggle('hide',det.protected);
   }
   if(S.dhist){const cv=$('#dchart');cv._redraw=()=>drawChart(cv,S.dhist,{});cv._redraw()}
@@ -126,14 +127,15 @@ document.body.addEventListener('click',async e=>{
   const t=e.target.closest('[data-open],[data-trim],[data-limit],[data-tp],[data-kp],[data-kill]');if(!t)return;
   const d=t.dataset;
   if(d.kill!==undefined){
-    if(!confirm(`Kill ${d.kill}?\n\nThis ends all ${d.procs} process(es) of this app immediately. Unsaved work in it will be lost.`))return;
+    const note=d.ui==='2'?`\n\nHeads-up: this browser also draws RamCapper's own window, so the dashboard will close too. RamCapper keeps running in the tray – reopen the window from the tray icon.`:d.ui==='1'?`\n\nRamCapper's own window (a separate ${d.kill} part of it) is left alone.`:'';
+    if(!confirm(`Kill ${d.kill}?\n\nThis ends all ${d.procs} process(es) of this app immediately. Unsaved work in it will be lost.${note}`))return;
     try{const r=await api('/api/kill',{name:d.kill});toast(`${d.kill}: ended ${r.killed} process(es)`)}catch(x){toast('Could not kill: '+x.message)}
     loadNow();return}
   if(d.open){S.open=d.open;S.dhist=null;$('#drawer').classList.add('open');renderDrawer();loadNow();loadHist()}
   else if(d.trim!==undefined){const r=await api('/api/trim',{name:d.trim});toast(`${d.trim}: freed ~${fmtB(r.freed)}${r.failed?` (${r.failed} not accessible)`:''}`);loadNow()}
   else if(d.limit!==undefined){location.href='/limiter.html?app='+encodeURIComponent(d.limit)}
   else if(d.tp){const r=await api('/api/trim',{pid:+d.tp});toast(r.ok?'Trimmed':'Not accessible');loadNow()}
-  else if(d.kp){if(confirm('End process '+d.kp+'? Unsaved work in it will be lost.')){await api('/api/kill',{pid:+d.kp});loadNow()}}
+  else if(d.kp){if(confirm('End process '+d.kp+'? Unsaved work in it will be lost.'+(d.ui==='1'?"\n\nThis process belongs to the browser that draws RamCapper's own window – ending it may close the dashboard.":''))){await api('/api/kill',{pid:+d.kp});loadNow()}}
 });
 $('#d-close').onclick=()=>{S.open=null;$('#drawer').classList.remove('open')};
 $('#d-trim').onclick=async()=>{const r=await api('/api/trim',{name:S.open});toast(`Freed ~${fmtB(r.freed)}`);loadNow()};
