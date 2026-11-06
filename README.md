@@ -38,6 +38,7 @@
 ### App experience
 - **One page per tab** – sidebar navigation with separate pages for Memory, Limiter, Network, Storage, Events and Settings; live system RAM and RamCapper's own resource use are always visible in the sidebar.
 - **Sortable tables with hideable columns** – click a header to sort; the ⋮ menu in a table's last header shows or hides columns (Odoo-style). Your choices are remembered.
+- **Mini stats bar** – a one-line pill at the top centre of the screen that appears when you minimize the dashboard: RAM % with a live sparkline, used/total, CPU, network speed and your biggest app. It flashes limiter actions, pulses red when memory is critical, restores the dashboard on click and has a right-click menu. Choose when it shows (minimized / whenever the window is hidden / always / off) in Settings.
 - **Tray icon** – RamCapper keeps running when you close its window; the notification-area icon opens the dashboard (click) or quits (right-click). Start with `--no-tray` to disable it.
 - **Close window vs. Quit** – *Close window* only closes the dashboard (monitoring and limits keep running); *Quit* exits completely.
 - **Single instance** – starting RamCapper again, or clicking the tray icon, focuses the open window instead of opening another. A newer version automatically replaces an older one that is still running. (Task Manager shows two `RamCapper.exe` entries for the one-file build – that is PyInstaller's launcher plus the app, not two copies.)

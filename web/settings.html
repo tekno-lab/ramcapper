@@ -32,6 +32,13 @@
     </div>
   </div>
   <section class="card">
+    <div class="row"><div class="grow"><h3>Mini stats bar</h3><div class="sub">A one-line pill at the top centre of your screen with live RAM, CPU, network and your biggest app. Click it to bring the dashboard back; right-click for a menu. It pulses red when memory is critical and flashes limiter actions.</div></div></div>
+    <div class="row" style="margin-top:14px;gap:10px;flex-wrap:wrap">
+      <select id="mb-mode"><option value="minimized">Show when the window is minimized</option><option value="hidden">Show whenever the window isn't on screen (minimized or closed)</option><option value="always">Always show</option><option value="off">Off</option></select>
+      <button class="btn sm" id="mb-preview">Preview for 6 s</button>
+    </div>
+  </section>
+  <section class="card">
     <h3>Shortcuts &amp; pinning</h3>
     <div class="sub">Open RamCapper from the Start menu or desktop, or pin it to the taskbar.</div>
     <table style="margin-top:8px"><tbody>
@@ -49,6 +56,7 @@
 </main>
 <script>
 window.onInfo=i=>{
+  if(document.activeElement!==$('#mb-mode'))$('#mb-mode').value=i.minibar||'minimized';
   $('#i-dir').textContent=i.data_dir;$('#i-meta').textContent=`history.db ${fmtB(i.db_size)}`;
   const fixed=i.data_source==='arg'||i.data_source==='env';
   $('#i-fixed').classList.toggle('hide',!fixed);$('#i-change').classList.toggle('hide',fixed);
@@ -59,6 +67,8 @@ window.onInfo=i=>{
     .map(([k,v])=>`<span>${k}</span><span style="word-break:break-all">${esc(v)}</span>`).join('');
 };
 $('#i-elev').onclick=elevate;
+$('#mb-mode').onchange=async e=>{try{await api('/api/minibar',{mode:e.target.value});toast('Mini bar: '+e.target.selectedOptions[0].text.toLowerCase())}catch(x){toast(x.message)}};
+$('#mb-preview').onclick=()=>api('/api/minibar',{preview:true}).then(()=>toast('Look at the top centre of your screen'));
 let SC={start:false,desktop:false};
 function showSC(st){
   SC=st;

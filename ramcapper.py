@@ -26,7 +26,7 @@ from urllib.parse import parse_qs, urlparse
 
 import psutil
 
-VERSION = "1.4.1"
+VERSION = "1.5.0"
 FROZEN = getattr(sys, "frozen", False)
 HERE = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))   # bundled resources
 APP_DIR = os.path.dirname(sys.executable) if FROZEN else os.path.dirname(os.path.abspath(__file__))
@@ -206,6 +206,11 @@ def log_event(kind, app, detail):
     with wlock:
         wdb.execute("INSERT INTO events(ts,kind,app,detail) VALUES(?,?,?,?)", (int(time.time()), kind, app, detail))
         wdb.commit()
+    if kind != "info":
+        try:
+            pill_flash(f"{app}: {detail}")
+        except NameError:
+            pass
 
 
 # ---------------------------------------------------------------- config
@@ -223,6 +228,7 @@ def load_cfg():
         c.setdefault("global", dict(DEFAULT_CFG["global"]))
         c.setdefault("modules", dict(DEFAULT_CFG["modules"]))
         c.setdefault("netrules", [])
+        c.setdefault("minibar", "minimized")
         return c
     except Exception:
         return json.loads(json.dumps(DEFAULT_CFG))
@@ -1654,7 +1660,7 @@ class Handler(BaseHTTPRequestHandler):
                 except OSError:
                     size = 0
                 return self._send(200, {"admin": ADMIN, "data_dir": DATA_DIR, "data_source": DATA_SOURCE, "app_dir": APP_DIR,
-                                        "db_size": size, "frozen": FROZEN, "port": PORT, "version": VERSION})
+                                        "db_size": size, "frozen": FROZEN, "port": PORT, "version": VERSION, "minibar": pill_mode()})
             if u.path == "/api/shortcuts":
                 return self._send(200, shortcut_state())
             if u.path == "/api/net":
@@ -1693,6 +1699,7 @@ class Handler(BaseHTTPRequestHandler):
                 with cfg_lock:
                     new["modules"] = CFG.get("modules", dict(DEFAULT_CFG["modules"]))
                     new["netrules"] = CFG.get("netrules", [])
+                    new["minibar"] = CFG.get("minibar", "minimized")
                     CFG = new
                     save_cfg()
                 return self._send(200, new)
@@ -1721,6 +1728,14 @@ class Handler(BaseHTTPRequestHandler):
                     Net.force_ident = True      # a manual scan re-identifies every device
                     threading.Thread(target=net_scan, daemon=True).start()
                 return self._send(200, {})
+            if path == "/api/minibar":
+                if body.get("preview"):
+                    PILL["preview"] = time.time() + 6
+                if body.get("mode") in PILL_MODES:
+                    with cfg_lock:
+                        CFG["minibar"] = body["mode"]
+                        save_cfg()
+                return self._send(200, {"minibar": pill_mode()})
             if path == "/api/shortcut":
                 where = body.get("where")
                 if where not in ("start", "desktop"):
@@ -2213,6 +2228,319 @@ def start_tray(first_balloon):
     threading.Thread(target=_tray_thread, args=(first_balloon,), daemon=True).start()
 
 
+# ---------------------------------------------------------------- mini stats bar
+# A small always-on-top "pill" at the top centre of the screen with one line of live stats. By default it appears while the
+# dashboard window is minimized. Click it to bring the dashboard back; right-click for a menu.
+PILL_MODES = ("off", "minimized", "hidden", "always")
+PILL = {"hwnd": None, "flash": ("", 0.0), "preview": 0.0, "hist": deque(maxlen=60), "tick": 0, "size": (0, 0), "shown": False}
+gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+
+
+def pill_mode():
+    m = CFG.get("minibar", "minimized")
+    return m if m in PILL_MODES else "minimized"
+
+
+def pill_flash(text):
+    """Show a short message in the bar for a few seconds (limiter actions)."""
+    PILL["flash"] = (text[:64], time.time() + 6)
+
+
+def _rgb(r, g, b):
+    return r | (g << 8) | (b << 16)
+
+
+PILL_COL = {"bg": _rgb(15, 20, 28), "text": _rgb(232, 238, 246), "muted": _rgb(135, 148, 167), "ok": _rgb(52, 195, 143),
+            "warn": _rgb(242, 180, 65), "bad": _rgb(239, 106, 100), "accent": _rgb(91, 140, 255), "line": _rgb(48, 60, 78)}
+
+
+def _pill_fmt_rate(b):
+    return f"{b / 1048576:.1f} MB/s" if b >= 1048576 * 0.95 else (f"{b / 1024:.0f} KB/s" if b >= 1024 else f"{b:.0f} B/s")
+
+
+def _pill_app_color(name):
+    h = sum(ord(c) * (i + 3) for i, c in enumerate(name)) % 360
+    import colorsys
+    r, g, b = colorsys.hsv_to_rgb(h / 360, 0.55, 0.95)
+    return _rgb(int(r * 255), int(g * 255), int(b * 255))
+
+
+def _pill_items():
+    """The content of the bar as a list of items, or None while there is no data yet."""
+    with ST.lock:
+        s = dict(ST.sysinfo)
+        apps = list(ST.apps.values())
+    if not s:
+        return None
+    pct = s["percent"]
+    with cfg_lock:
+        g = dict(CFG.get("global", {}))
+    limit = g.get("threshold", 90) if g.get("enabled") else 90
+    level = "bad" if pct >= limit else ("warn" if pct >= 70 else "ok")
+    cpu = psutil.cpu_percent(None)
+    items = [("dot", level), ("text", f"{pct:.0f}%", "text", True),
+             ("text", f"{s['used'] / GB_:.1f} / {s['total'] / GB_:.1f} GB", "muted", False),
+             ("spark", level), ("sep",), ("text", "CPU ", "muted", False), ("text", f"{cpu:.0f}%", "text", True)]
+    if module_on("network") and Net.rate:
+        _, d, u = Net.rate[-1]
+        items += [("sep",), ("text", "↓ ", "accent", True), ("text", _pill_fmt_rate(d), "text", False),
+                  ("text", "  ↑ ", "warn", True), ("text", _pill_fmt_rate(u), "text", False)]
+    items.append(("sep",))
+    txt, until = PILL["flash"]
+    if txt and time.time() < until:
+        items.append(("text", "⚡ " + txt, "accent", True))
+    elif apps:
+        top = max(apps, key=lambda a: a["rss"])
+        items += [("rawdot", _pill_app_color(top["name"])), ("text", top["name"], "text", False),
+                  ("text", f"  {top['rss'] / GB_:.1f} GB" if top["rss"] >= GB_ else f"  {top['rss'] / MB_:.0f} MB", "muted", False)]
+    return items, level, pct >= limit
+
+
+MB_ = 1048576
+GB_ = 1073741824
+
+
+def _pill_thread():
+    I, VPp = ctypes.c_int, VP
+    for n, res, args in [
+        ("CreateCompatibleDC", VPp, [VPp]), ("CreateCompatibleBitmap", VPp, [VPp, I, I]), ("SelectObject", VPp, [VPp, VPp]),
+        ("DeleteObject", wintypes.BOOL, [VPp]), ("DeleteDC", wintypes.BOOL, [VPp]), ("CreateSolidBrush", VPp, [wintypes.COLORREF]),
+        ("CreatePen", VPp, [I, I, wintypes.COLORREF]), ("RoundRect", wintypes.BOOL, [VPp, I, I, I, I, I, I]),
+        ("Ellipse", wintypes.BOOL, [VPp, I, I, I, I]), ("SetTextColor", wintypes.COLORREF, [VPp, wintypes.COLORREF]),
+        ("SetBkMode", I, [VPp, I]), ("TextOutW", wintypes.BOOL, [VPp, I, I, wintypes.LPCWSTR, I]),
+        ("GetTextExtentPoint32W", wintypes.BOOL, [VPp, wintypes.LPCWSTR, I, ctypes.POINTER(wintypes.SIZE)]),
+        ("BitBlt", wintypes.BOOL, [VPp, I, I, I, I, VPp, I, I, wintypes.DWORD]),
+        ("Polyline", wintypes.BOOL, [VPp, ctypes.POINTER(wintypes.POINT), I]),
+        ("CreateRoundRectRgn", VPp, [I, I, I, I, I, I]),
+        ("CreateFontW", VPp, [I, I, I, I, I] + [wintypes.DWORD] * 8 + [wintypes.LPCWSTR]),
+    ]:
+        f = getattr(gdi32, n)
+        f.restype, f.argtypes = res, args
+    for n, res, args in [
+        ("GetDC", VPp, [VPp]), ("ReleaseDC", I, [VPp, VPp]), ("BeginPaint", VPp, [wintypes.HWND, VPp]), ("EndPaint", wintypes.BOOL, [wintypes.HWND, VPp]),
+        ("InvalidateRect", wintypes.BOOL, [wintypes.HWND, VPp, wintypes.BOOL]), ("ShowWindow", wintypes.BOOL, [wintypes.HWND, I]),
+        ("SetWindowPos", wintypes.BOOL, [wintypes.HWND, VPp, I, I, I, I, wintypes.UINT]),
+        ("SetWindowRgn", I, [wintypes.HWND, VPp, wintypes.BOOL]), ("SetLayeredWindowAttributes", wintypes.BOOL, [wintypes.HWND, wintypes.COLORREF, ctypes.c_ubyte, wintypes.DWORD]),
+        ("SetTimer", VPp, [wintypes.HWND, VPp, wintypes.UINT, VPp]), ("SystemParametersInfoW", wintypes.BOOL, [wintypes.UINT, wintypes.UINT, VPp, wintypes.UINT]),
+        ("IsIconic", wintypes.BOOL, [wintypes.HWND]), ("SetForegroundWindow", wintypes.BOOL, [wintypes.HWND]),
+        ("DefWindowProcW", LRESULT, [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]),
+        ("CreateWindowExW", wintypes.HWND, [wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD, I, I, I, I, wintypes.HWND, VPp, VPp, VPp]),
+        ("CreatePopupMenu", VPp, []), ("AppendMenuW", wintypes.BOOL, [VPp, wintypes.UINT, VPp, wintypes.LPCWSTR]),
+        ("TrackPopupMenu", wintypes.BOOL, [VPp, wintypes.UINT, I, I, I, wintypes.HWND, VPp]), ("DestroyMenu", wintypes.BOOL, [VPp]),
+        ("PostMessageW", wintypes.BOOL, [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]),
+    ]:
+        f = getattr(user32, n)
+        f.restype, f.argtypes = res, args
+    try:
+        scale = user32.GetDpiForSystem() / 96.0
+    except Exception:
+        scale = 1.0
+    S_ = lambda v: int(round(v * scale))
+
+    scr = user32.GetDC(None)
+    mdc = gdi32.CreateCompatibleDC(scr)
+    fonts = {}
+    for key, w in (("reg", 400), ("bold", 700)):
+        fonts[key] = gdi32.CreateFontW(-S_(13), 0, 0, 0, w, 0, 0, 0, 1, 0, 0, 5, 0, "Segoe UI")
+    state = {"bmp": None, "hover": False}
+
+    def measure(text, bold):
+        gdi32.SelectObject(mdc, fonts["bold" if bold else "reg"])
+        sz = wintypes.SIZE()
+        gdi32.GetTextExtentPoint32W(mdc, text, len(text), ctypes.byref(sz))
+        return sz.cx, sz.cy
+
+    def render(hwnd):
+        got = _pill_items()
+        if not got:
+            return False
+        items, level, alarm = got
+        H = S_(34)
+        padx, gap = S_(16), S_(9)
+        widths = []
+        for it in items:
+            k = it[0]
+            widths.append(S_(10) if k in ("dot", "rawdot") else S_(58) if k == "spark" else S_(1) if k == "sep"
+                          else measure(it[1], it[3])[0])
+        total = padx * 2 + sum(widths) + gap * (len(items) - 1) + S_(6) * sum(1 for it in items if it[0] == "sep") * 2
+        W = max(S_(120), total)
+        bmp = gdi32.CreateCompatibleBitmap(scr, W, H)
+        old = gdi32.SelectObject(mdc, bmp)
+        # frame: dark pill with a coloured border (pulses red when memory is critical)
+        border = PILL_COL[level]
+        if alarm and int(time.time() * 1.6) % 2:
+            border = _rgb(255, 150, 140)
+        bg = gdi32.CreateSolidBrush(PILL_COL["bg"])
+        pen = gdi32.CreatePen(0, S_(2), border)
+        ob, op = gdi32.SelectObject(mdc, bg), gdi32.SelectObject(mdc, pen)
+        gdi32.RoundRect(mdc, 0, 0, W, H, H, H)
+        gdi32.SelectObject(mdc, ob)
+        gdi32.SelectObject(mdc, op)
+        gdi32.DeleteObject(bg)
+        gdi32.DeleteObject(pen)
+        gdi32.SetBkMode(mdc, 1)
+        x = padx
+        hist = list(PILL["hist"])
+        for it, w in zip(items, widths):
+            k = it[0]
+            if k in ("dot", "rawdot"):
+                col = PILL_COL[it[1]] if k == "dot" else it[1]
+                br = gdi32.CreateSolidBrush(col)
+                pn = gdi32.CreatePen(5, 0, col)                       # PS_NULL
+                a, b = gdi32.SelectObject(mdc, br), gdi32.SelectObject(mdc, pn)
+                gdi32.Ellipse(mdc, x, (H - w) // 2, x + w, (H + w) // 2)
+                gdi32.SelectObject(mdc, a)
+                gdi32.SelectObject(mdc, b)
+                gdi32.DeleteObject(br)
+                gdi32.DeleteObject(pn)
+            elif k == "spark" and len(hist) >= 2:
+                lo, hi = min(hist), max(hist)
+                hi = max(hi, lo + 4)
+                sh = S_(16)
+                pts = (wintypes.POINT * len(hist))(*[
+                    wintypes.POINT(x + int(i * (w - 1) / (len(hist) - 1)), (H + sh) // 2 - int((v - lo) / (hi - lo) * sh))
+                    for i, v in enumerate(hist)])
+                pn = gdi32.CreatePen(0, S_(2), PILL_COL[it[1]])
+                a = gdi32.SelectObject(mdc, pn)
+                gdi32.Polyline(mdc, pts, len(hist))
+                gdi32.SelectObject(mdc, a)
+                gdi32.DeleteObject(pn)
+            elif k == "sep":
+                x += S_(6)
+                pn = gdi32.CreatePen(0, 1, PILL_COL["line"])
+                a = gdi32.SelectObject(mdc, pn)
+                pts = (wintypes.POINT * 2)(wintypes.POINT(x, S_(9)), wintypes.POINT(x, H - S_(9)))
+                gdi32.Polyline(mdc, pts, 2)
+                gdi32.SelectObject(mdc, a)
+                gdi32.DeleteObject(pn)
+                x += S_(6)
+            elif k == "text":
+                cx, cy = measure(it[1], it[3])
+                gdi32.SetTextColor(mdc, PILL_COL[it[2]])
+                gdi32.TextOutW(mdc, x, (H - cy) // 2, it[1], len(it[1]))
+            x += w + gap
+        if state["bmp"]:
+            gdi32.DeleteObject(state["bmp"])                           # the previous frame (already deselected above)
+        state["bmp"] = bmp
+        if (W, H) != PILL["size"]:
+            PILL["size"] = (W, H)
+            gdi32.SelectObject(mdc, bmp)
+            rgn = gdi32.CreateRoundRectRgn(0, 0, W + 1, H + 1, H, H)
+            user32.SetWindowRgn(hwnd, rgn, True)
+        wa = wintypes.RECT()
+        user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(wa), 0)    # SPI_GETWORKAREA
+        user32.SetWindowPos(hwnd, VPp(-1), wa.left + (wa.right - wa.left - W) // 2, wa.top + S_(8), W, H, 0x0010 | 0x0040)
+        user32.InvalidateRect(hwnd, None, False)
+        return True
+
+    def want_visible():
+        if time.time() < PILL["preview"]:
+            return True
+        mode = pill_mode()
+        if mode == "off":
+            return False
+        if mode == "always":
+            return True
+        wins = find_ui_windows()
+        if mode == "minimized":
+            return bool(wins) and all(user32.IsIconic(h) for h in wins)
+        return not any(not user32.IsIconic(h) for h in wins)         # "hidden": no dashboard window on screen
+
+    def on_tick(hwnd):
+        PILL["tick"] += 1
+        if PILL["tick"] % 2 == 0:                                      # one history sample per second
+            with ST.lock:
+                p = ST.sysinfo.get("percent")
+            if p is not None:
+                PILL["hist"].append(p)
+        try:
+            if want_visible():
+                if render(hwnd):
+                    PILL["shown"] = True
+            elif PILL["shown"]:
+                PILL["shown"] = False
+                user32.ShowWindow(hwnd, 0)
+        except Exception as e:
+            print("minibar error:", e, file=sys.stderr)
+
+    def wndproc(hwnd, msg, wparam, lparam):
+        if msg == 0x0113:                                              # WM_TIMER
+            on_tick(hwnd)
+            return 0
+        if msg == 0x000F:                                              # WM_PAINT
+            ps = ctypes.create_string_buffer(72)
+            hdc = user32.BeginPaint(hwnd, ps)
+            W, H = PILL["size"]
+            if state["bmp"]:
+                gdi32.SelectObject(mdc, state["bmp"])
+                gdi32.BitBlt(hdc, 0, 0, W, H, mdc, 0, 0, 0x00CC0020)  # SRCCOPY
+            user32.EndPaint(hwnd, ps)
+            return 0
+        if msg == 0x0014:                                              # WM_ERASEBKGND
+            return 1
+        if msg == 0x0021:                                              # WM_MOUSEACTIVATE -> never take focus
+            return 3
+        if msg == 0x0202:                                              # click: bring the dashboard back
+            PILL["preview"] = 0.0
+            threading.Thread(target=show_window, daemon=True).start()
+            return 0
+        if msg == 0x0205:                                              # right click: menu
+            pt = wintypes.POINT()
+            user32.GetCursorPos(ctypes.byref(pt))
+            menu = user32.CreatePopupMenu()
+            user32.AppendMenuW(menu, 0, 1, "Open RamCapper")
+            user32.AppendMenuW(menu, 0, 2, "Optimize now")
+            user32.AppendMenuW(menu, 0, 3, "Turn off mini bar")
+            user32.AppendMenuW(menu, 0x800, 0, None)
+            user32.AppendMenuW(menu, 0, 4, "Quit RamCapper")
+            user32.SetForegroundWindow(hwnd)
+            user32.TrackPopupMenu(menu, 0x0002, pt.x, pt.y, 0, hwnd, None)
+            user32.PostMessageW(hwnd, 0, 0, 0)
+            user32.DestroyMenu(menu)
+            return 0
+        if msg == 0x0111:                                              # WM_COMMAND
+            cmd = wparam & 0xFFFF
+            if cmd == 1:
+                threading.Thread(target=show_window, daemon=True).start()
+            elif cmd == 2:
+                threading.Thread(target=lambda: trim_apps(None), daemon=True).start()
+            elif cmd == 3:
+                with cfg_lock:
+                    CFG["minibar"] = "off"
+                    save_cfg()
+            elif cmd == 4:
+                threading.Thread(target=quit_app, daemon=True).start()
+            return 0
+        return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+    PILL["proc"] = WNDPROC(wndproc)
+    wc = WNDCLASSW()
+    wc.lpfnWndProc, wc.lpszClassName = PILL["proc"], "RamCapperMiniBar"
+    wc.hInstance = k32.GetModuleHandleW(None)
+    wc.hCursor = user32.LoadCursorW(None, ctypes.c_void_p(32649))      # IDC_HAND
+    user32.RegisterClassW(ctypes.byref(wc))
+    # topmost tool window (no taskbar button), layered so it can be slightly translucent, never activated
+    hwnd = user32.CreateWindowExW(0x00000008 | 0x00000080 | 0x00080000 | 0x08000000, "RamCapperMiniBar", "RamCapper mini bar",
+                                  0x80000000, 0, 0, 10, 10, None, None, wc.hInstance, None)
+    user32.SetLayeredWindowAttributes(hwnd, 0, 240, 2)
+    PILL["hwnd"] = hwnd
+    psutil.cpu_percent(None)
+    user32.SetTimer(hwnd, VPp(1), 500, None)
+    msg = wintypes.MSG()
+    while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+        user32.TranslateMessage(ctypes.byref(msg))
+        user32.DispatchMessageW(ctypes.byref(msg))
+
+
+def start_minibar():
+    k32.GetModuleHandleW.restype = VP
+    k32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+    user32.LoadCursorW.restype = VP
+    user32.LoadCursorW.argtypes = [VP, VP]
+    user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
+    threading.Thread(target=_pill_thread, daemon=True).start()
+
+
 def retire_other_version():
     """If the copy already running is another version (e.g. an old exe left running), ask it to quit.
     Returns True when a quit request was accepted. Same-version copies are left alone (single instance)."""
@@ -2259,8 +2587,13 @@ def main():
     threading.Thread(target=sampler, daemon=True).start()
     if ADMIN:
         threading.Thread(target=reapply_net_rules, daemon=True).start()
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)         # crisp text in the mini bar on high-DPI screens
+    except Exception:
+        pass
     if "--no-tray" not in sys.argv:
         start_tray(first_balloon=not no_open and not takeover)
+    start_minibar()
     if not no_open:
         threading.Timer(1.0, open_window).start()
     print(f"RamCapper running on http://127.0.0.1:{PORT}  (admin={ADMIN})")
