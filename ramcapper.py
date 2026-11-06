@@ -2388,7 +2388,7 @@ def start_tray(first_balloon):
 # A "notch" that hangs from the top edge of the screen (top-centre) with one line of live stats. By default it slides down while
 # the dashboard window is minimized. Click it to bring the dashboard back; right-click for a menu.
 # Drawn with GDI+ into a per-pixel-alpha layered window, so every curve is anti-aliased.
-PILL_MODES = ("off", "minimized", "hidden", "always")
+PILL_MODES = ("off", "minimized", "hidden", "desktop", "always")
 PILL = {"near_until": 0.0, "eligible": False, "last_want": False, "hwnd": None, "flash": ("", 0.0), "preview": 0.0, "hist": deque(maxlen=60), "tick": 0, "shown": False, "anim": None,
         "frame": None}
 gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
@@ -3094,6 +3094,46 @@ def _pill_thread():
         t = min(1.0, (time.time() - a["t0"]) / 0.30)
         return (1 - (1 - t) ** 3 if a["dir"] > 0 else (1 - t) ** 3), t >= 1.0     # slide out (ease-out) / back in (ease-in)
 
+    def on_desktop():
+        """True when the user is looking at the desktop: the desktop has focus, or every app window is minimized / hidden."""
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+        user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+        dwm = ctypes.windll.dwmapi
+        buf = ctypes.create_unicode_buffer(64)
+        fg = user32.GetForegroundWindow()
+        if fg:
+            user32.GetClassNameW(fg, buf, 64)
+            if buf.value in ("Progman", "WorkerW"):              # the desktop itself is focused (e.g. after Win+D or a click on it)
+                return True
+        shell = {"Shell_TrayWnd", "Shell_SecondaryTrayWnd", "Progman", "WorkerW", "RamCapperMiniBar", "RamCapperTray",
+                 "NotifyIconOverflowWindow", "TopLevelWindowForOverflowXamlIsland", "XamlExplorerHostIslandWindow"}
+        PROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        found = []
+
+        def cb(h, _):
+            if not user32.IsWindowVisible(h) or user32.IsIconic(h):
+                return True
+            user32.GetClassNameW(h, buf, 64)
+            if buf.value in shell or user32.GetWindowTextLengthW(h) == 0:
+                return True
+            ex = user32.GetWindowLongW(h, -20)                      # GWL_EXSTYLE
+            if (ex & 0x80 and not ex & 0x40000) or ex & 0x08000000:   # tool windows / never-activated overlays are not "apps"
+                return True
+            cloaked = wintypes.DWORD(0)
+            if dwm.DwmGetWindowAttribute(h, 14, ctypes.byref(cloaked), 4) == 0 and cloaked.value:   # DWMWA_CLOAKED (hidden UWP shells)
+                return True
+            r = wintypes.RECT()
+            user32.GetWindowRect(h, ctypes.byref(r))
+            if r.right - r.left < 120 or r.bottom - r.top < 60:
+                return True
+            found.append(h)
+            return False                                            # one is enough: not the desktop
+
+        user32.EnumWindows.argtypes = [PROC, wintypes.LPARAM]
+        user32.EnumWindows(PROC(cb), 0)
+        return not found
+
     def want_visible():
         if time.time() < PILL["preview"]:
             return True
@@ -3102,6 +3142,8 @@ def _pill_thread():
             return False
         if mode == "always":
             return True
+        if mode == "desktop":
+            return on_desktop()
         wins = find_ui_windows()
         if mode == "minimized":
             return bool(wins) and all(user32.IsIconic(h) for h in wins)
