@@ -30,6 +30,7 @@ const NAV=[
   ['index','/','Memory','<rect x="3" y="7" width="18" height="10" rx="2"/><path d="M7 11v2M11 11v2M15 11v2M7 17v2M11 17v2M15 17v2"/>'],
   ['limiter','/limiter.html','Limiter','<path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/>'],
   ['network','/network.html','Network','<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.5 3 14.5 0 18M12 3c-3 3.5-3 14.5 0 18"/>'],
+  ['gpu','/gpu.html','GPU','<rect x="2.5" y="7" width="19" height="10" rx="2"/><circle cx="14.5" cy="12" r="2.6"/><path d="M6 10.5h3M6 13.5h2"/>'],
   ['storage','/storage.html','Storage','<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>'],
   ['events','/events.html','Events','<path d="M5 6h14M5 12h14M5 18h9"/>'],
   ['settings','/settings.html','Settings','<circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1"/>'],

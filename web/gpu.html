@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RamCapper</title>
+<link rel="icon" type="image/png" href="/logo.png">
+<link rel="stylesheet" href="/app.css">
+<style>
+.gcards{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:16px}
+.gcards .card+.card{margin-top:0}
+.gname{display:flex;align-items:center;gap:10px}
+.gname b{font-size:15px}
+.gbig{font-size:40px;font-weight:700;letter-spacing:-1px;line-height:1}
+.gchart{height:96px;margin-top:10px}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}
+.chip2{font-size:12px;padding:2px 10px;border-radius:99px;background:var(--panel2);border:1px solid var(--line);color:var(--muted)}
+.chip2 b{color:var(--text);margin-left:4px}
+.mrow{display:flex;justify-content:space-between;font-size:12.5px;margin-top:12px}
+.mrow b{font-variant-numeric:tabular-nums}
+</style>
+</head>
+<body data-page="gpu" data-title="GPU">
+<script src="/app.js"></script>
+<main class="main">
+  <header class="phead">
+    <div class="grow"><h1>GPU</h1><p>How busy each graphics card is, how much video memory it uses, and which app is using which card.</p></div>
+  </header>
+
+  <div class="card empty hide" id="off"></div>
+  <div id="on" class="hide">
+    <div class="gcards" id="cards"></div>
+    <section class="card">
+      <div class="row"><div class="grow"><h3>Apps using the GPU</h3><div class="sub">Usage and video memory per app on each card, busiest first. Click a column to sort; ⋮ shows or hides columns.</div></div></div>
+      <table id="app-t" style="margin-top:8px"></table>
+    </section>
+  </div>
+</main>
+
+<script>
+const GCOL=['#5b8cff','#34c38f','#f59f45','#e5609a','#9b7bea','#3cc8c8'];
+const short=n=>{const s=n.replace(/NVIDIA |GeForce |AMD |Radeon\(TM\) |\(R\)|\(TM\)|Intel /g,'').trim();return (s||n).slice(0,18)};
+const fmtM=b=>b>=GB?(b/GB).toFixed(2)+' GB':Math.round(b/MB)+' MB';
+let G=null,DT=null,sig='';
+function drawGpu(cv,hist,color){
+  const dpr=devicePixelRatio||1,w=cv.clientWidth,h=cv.clientHeight;cv.width=w*dpr;cv.height=h*dpr;
+  const g=cv.getContext('2d');g.setTransform(dpr,0,0,dpr,0,0);g.clearRect(0,0,w,h);
+  const css=getComputedStyle(document.documentElement),grid=css.getPropertyValue('--grid').trim(),muted=css.getPropertyValue('--muted').trim();
+  const L=30,T=4,B=4,pw=w-L-4,ph=h-T-B;g.font='10.5px "Segoe UI"';g.textBaseline='middle';
+  [0,50,100].forEach(v=>{const y=T+ph*(1-v/100);g.strokeStyle=grid;g.beginPath();g.moveTo(L,y);g.lineTo(w,y);g.stroke();g.fillStyle=muted;g.textAlign='right';g.fillText(v+'%',L-5,y)});
+  if(hist.length<2)return;
+  const X=i=>L+i/(299)*pw,off=300-hist.length,Y=v=>T+ph*(1-Math.min(100,v)/100);
+  g.beginPath();hist.forEach((p,i)=>{const x=X(i+off),y=Y(p[0]);i?g.lineTo(x,y):g.moveTo(x,y)});
+  g.lineTo(X(299),T+ph);g.lineTo(X(off),T+ph);g.closePath();g.fillStyle=color+'33';g.fill();
+  g.beginPath();hist.forEach((p,i)=>{const x=X(i+off),y=Y(p[0]);i?g.lineTo(x,y):g.moveTo(x,y)});g.strokeStyle=color;g.lineWidth=1.8;g.stroke();
+}
+function renderCards(){
+  $('#cards').innerHTML=G.adapters.map((a,i)=>{
+    const c=GCOL[i%GCOL.length],eng=Object.entries(a.engines).sort((x,y)=>y[1]-x[1]).slice(0,6);
+    const vp=a.vram?Math.min(100,a.ded/a.vram*100):0;
+    return `<div class="card"><div class="gname"><i class="dot" style="background:${c}"></i><b>${esc(a.name)}</b></div>
+      <div class="row" style="margin-top:12px;align-items:flex-end"><div class="gbig" style="color:${a.util>=85?'var(--bad)':a.util>=60?'var(--warn)':'var(--text)'}">${a.util.toFixed(0)}%</div><div class="sub" style="padding-bottom:6px">utilization (busiest engine)</div></div>
+      <div class="gchart"><canvas data-i="${i}"></canvas></div>
+      <div class="mrow"><span class="sub">Dedicated video memory</span><b>${fmtM(a.ded)}${a.vram?' / '+fmtM(a.vram):''}</b></div>
+      ${a.vram?`<div class="bar"><i style="width:${vp}%;background:${c}"></i></div>`:''}
+      <div class="mrow"><span class="sub">Shared (system) memory used</span><b>${fmtM(a.shared)}</b></div>
+      <div class="chips">${eng.map(([k,v])=>`<span class="chip2">${esc(k)}<b>${v.toFixed(0)}%</b></span>`).join('')||'<span class="sub">Idle</span>'}</div></div>`}).join('');
+  $$('#cards canvas').forEach(cv=>{const a=G.adapters[+cv.dataset.i];drawGpu(cv,a.hist,GCOL[+cv.dataset.i%GCOL.length])});
+}
+function buildTable(){
+  const cols=[
+    {id:'app',label:'App',fixed:true,val:r=>r.name,first:'asc',render:r=>`<div class="name">${icon(r.name)}<b>${esc(r.name)}</b>${r.procs>1?`<span class="sub">${r.procs} procs</span>`:''}</div>`},
+    {id:'total',label:'GPU usage',tip:'The busiest card this app is using',val:r=>r.maxUtil,render:r=>`<span class="rate ${r.maxUtil>=10?'hot':''}">${r.maxUtil.toFixed(1)}%</span><div class="bar"><i style="width:${Math.min(100,r.maxUtil)}%;background:var(--accent)"></i></div>`},
+  ];
+  G.adapters.forEach((a,i)=>{
+    const c=GCOL[i%GCOL.length],l=a.luid,sn=short(a.name),sw=/basic render/i.test(a.name);
+    cols.push({id:'u'+l,label:`<i class="dot" style="background:${c}"></i> ${esc(sn)}`,menu:sn+' · usage',th:'r',td:'r',off:sw,tip:a.name+' – usage',val:r=>(r.gpus[l]||{util:0}).util,
+      render:r=>{const v=r.gpus[l];return v&&v.util>=0.05?`<span class="rate">${v.util.toFixed(1)}%</span>`:'<span class="sub">–</span>'}});
+    cols.push({id:'m'+l,label:`${esc(sn)} VRAM`,menu:sn+' · video memory',th:'r',td:'r',off:sw,tip:a.name+' – dedicated video memory',val:r=>(r.gpus[l]||{ded:0}).ded,
+      render:r=>{const v=r.gpus[l];return v&&v.ded>0?fmtM(v.ded):'<span class="sub">–</span>'}});
+  });
+  cols.push({id:'shr',label:'Shared mem',menu:'Shared (system) memory',th:'r',td:'r',off:true,val:r=>r.shared,render:r=>r.shared?fmtM(r.shared):'<span class="sub">–</span>'});
+  DT=DataTable($('#app-t'),{key:'gpuapps',sort:'total',dir:-1,limit:60,empty:'Nothing is using the GPU right now',
+    tie:(a,b)=>b.totalMem-a.totalMem,cols});
+}
+async function poll(){
+  try{
+    G=await api('/api/gpu');
+    const off=$('#off');
+    if(!G.available||!G.adapters.length){
+      off.classList.remove('hide');$('#on').classList.add('hide');
+      off.textContent=G.reason||(G.available?'No GPU activity detected yet.':'Starting the GPU monitor…');return}
+    off.classList.add('hide');$('#on').classList.remove('hide');
+    const s=G.adapters.map(a=>a.luid).join('|');
+    if(s!==sig){sig=s;buildTable()}
+    renderCards();
+    DT.render(G.apps.map(r=>{
+      const vals=Object.values(r.gpus);
+      return Object.assign({},r,{maxUtil:Math.max(0,...vals.map(v=>v.util)),totalMem:vals.reduce((a,v)=>a+v.ded,0),shared:vals.reduce((a,v)=>a+v.shared,0)})}));
+  }catch(e){}
+}
+window.addEventListener('resize',()=>G&&G.adapters.length&&renderCards());
+setInterval(poll,2000);poll();
+boot();
+</script>
+</body>
+</html>

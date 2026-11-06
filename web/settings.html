@@ -58,7 +58,7 @@
 <script>
 window.onInfo=i=>{
   if(document.activeElement!==$('#mb-mode'))$('#mb-mode').value=i.minibar||'minimized';
-  if(document.activeElement!==$('#mb-side'))$('#mb-side').value=i.notch_side||'top';
+  if(document.activeElement!==$('#mb-side'))$('#mb-side').value=i.notch_side||'bottom';
   $('#i-dir').textContent=i.data_dir;$('#i-meta').textContent=`history.db ${fmtB(i.db_size)}`;
   const fixed=i.data_source==='arg'||i.data_source==='env';
   $('#i-fixed').classList.toggle('hide',!fixed);$('#i-change').classList.toggle('hide',fixed);

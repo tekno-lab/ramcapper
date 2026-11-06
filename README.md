@@ -32,13 +32,16 @@
 - **Device discovery** – scans your local subnet and alerts on new devices. Devices are identified by hostname (NetBIOS, mDNS, router DNS), UPnP description, a MAC-vendor database and a light port fingerprint (router, printer, Chromecast, IoT…). Click ✎ to give any device your own name.
 - **Network limits** – per-app **Throttle upload** (Windows QoS) or **Block internet** (Windows Firewall rule), plus **Kill**. Limits need administrator rights; download speed can't be limited natively by Windows.
 
+### GPU
+- **GPU tab** – every graphics card (NVIDIA, AMD, Intel) with live utilization, a 5-minute history chart, video-memory use and engine breakdown (3D, Copy, Video…), plus a table showing **how much of each card every app is using** (usage and VRAM per card). Same sortable / hideable columns. No admin needed.
+
 ### Storage *(opt-in)*
 - Scan a drive or folder to see what takes the most space: drill-down folders, largest files, breakdown by file type. Read-only.
 
 ### App experience
 - **One page per tab** – sidebar navigation with separate pages for Memory, Limiter, Network, Storage, Events and Settings; live system RAM and RamCapper's own resource use are always visible in the sidebar.
 - **Sortable tables with hideable columns** – click a header to sort; the ⋮ menu in a table's last header shows or hides columns (Odoo-style). Your choices are remembered.
-- **Notch stats bar** – a one-line notch that slides down from the top edge of the screen when you minimize the dashboard: RAM % with a live sparkline and used/total, total CPU, GPU usage, live download and upload speed (with icons) and your biggest app. It flashes limiter actions, pulses red when memory is critical, restores the dashboard on click and has a right-click menu. Choose when it shows (minimized / whenever the window is hidden / always / off) in Settings. Place it on the top, bottom (just above the taskbar), left or right edge – the side positions switch to a vertical dock layout with progress bars.
+- **Notch stats bar** – a one-line notch that slides down from the top edge of the screen when you minimize the dashboard: RAM % with a live sparkline and used/total, total CPU, GPU usage, live download and upload speed (with icons) and your biggest app. It flashes limiter actions, pulses red when memory is critical, restores the dashboard on click and has a right-click menu. Choose when it shows (minimized / whenever the window is hidden / always / off) in Settings. Place it on the bottom (just above the taskbar, the default), top, left or right edge – the side positions switch to a vertical dock layout with progress bars.
 - **Tray icon** – RamCapper keeps running when you close its window; the notification-area icon opens the dashboard (click) or quits (right-click). Start with `--no-tray` to disable it.
 - **Close window vs. Quit** – *Close window* only closes the dashboard (monitoring and limits keep running); *Quit* exits completely.
 - **Single instance** – starting RamCapper again, or clicking the tray icon, focuses the open window instead of opening another. A newer version automatically replaces an older one that is still running. (Task Manager shows two `RamCapper.exe` entries for the one-file build – that is PyInstaller's launcher plus the app, not two copies.)

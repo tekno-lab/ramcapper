@@ -34,7 +34,7 @@ except Exception:
     except Exception:
         pass
 
-VERSION = "1.6.0"
+VERSION = "1.7.0"
 FROZEN = getattr(sys, "frozen", False)
 HERE = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))   # bundled resources
 APP_DIR = os.path.dirname(sys.executable) if FROZEN else os.path.dirname(os.path.abspath(__file__))
@@ -237,7 +237,7 @@ def load_cfg():
         c.setdefault("modules", dict(DEFAULT_CFG["modules"]))
         c.setdefault("netrules", [])
         c.setdefault("minibar", "minimized")
-        c.setdefault("notch_side", "top")
+        c.setdefault("notch_side", "bottom")
         return c
     except Exception:
         return json.loads(json.dumps(DEFAULT_CFG))
@@ -1670,6 +1670,8 @@ class Handler(BaseHTTPRequestHandler):
                     size = 0
                 return self._send(200, {"admin": ADMIN, "data_dir": DATA_DIR, "data_source": DATA_SOURCE, "app_dir": APP_DIR,
                                         "db_size": size, "frozen": FROZEN, "port": PORT, "version": VERSION, "minibar": pill_mode(), "notch_side": pill_side()})
+            if u.path == "/api/gpu":
+                return self._send(200, gpu_payload())
             if u.path == "/api/shortcuts":
                 return self._send(200, shortcut_state())
             if u.path == "/api/net":
@@ -1709,7 +1711,7 @@ class Handler(BaseHTTPRequestHandler):
                     new["modules"] = CFG.get("modules", dict(DEFAULT_CFG["modules"]))
                     new["netrules"] = CFG.get("netrules", [])
                     new["minibar"] = CFG.get("minibar", "minimized")
-                    new["notch_side"] = CFG.get("notch_side", "top")
+                    new["notch_side"] = CFG.get("notch_side", "bottom")
                     CFG = new
                     save_cfg()
                 return self._send(200, new)
@@ -2263,8 +2265,8 @@ PILL_SIDES = ("top", "bottom", "left", "right")
 
 
 def pill_side():
-    m = CFG.get("notch_side", "top")
-    return m if m in PILL_SIDES else "top"
+    m = CFG.get("notch_side", "bottom")
+    return m if m in PILL_SIDES else "bottom"
 
 
 def pill_flash(text):
@@ -2330,9 +2332,89 @@ def _pill_items(d):
     return items
 
 
+class GPU:
+    """Per-adapter and per-app GPU figures from the Windows "GPU Engine" / "GPU Process Memory" / "GPU Adapter Memory"
+    performance counters (the same source Task Manager uses; works for NVIDIA, AMD and Intel, no admin needed)."""
+    lock = threading.Lock()
+    adapters = {}        # luid -> {"name", "vram"}
+    live = {}            # luid -> {"util", "engines": {type: pct}, "ded", "shared"}
+    hist = {}            # luid -> deque of (util, dedicated bytes), 1 sample/s
+    apps = {}            # exe name -> {"procs", "gpus": {luid: {"util", "ded", "shared"}}}
+    ok = False
+    reason = "starting"
+
+
+def _gpu_adapters():
+    """Map adapter LUIDs to names (D3DKMT) and video-memory sizes (registry)."""
+    out = {}
+    try:
+        g = ctypes.WinDLL("gdi32")
+
+        class INFO(ctypes.Structure):
+            _fields_ = [("h", wintypes.UINT), ("low", wintypes.DWORD), ("high", wintypes.LONG), ("src", wintypes.ULONG), ("pm", wintypes.BOOL)]
+
+        class ENUM(ctypes.Structure):
+            _fields_ = [("n", wintypes.ULONG), ("p", ctypes.c_void_p)]
+
+        class QRY(ctypes.Structure):
+            _fields_ = [("h", wintypes.UINT), ("type", wintypes.UINT), ("data", ctypes.c_void_p), ("size", wintypes.UINT)]
+
+        class REG(ctypes.Structure):
+            _fields_ = [("name", ctypes.c_wchar * 260), ("bios", ctypes.c_wchar * 260), ("dac", ctypes.c_wchar * 260), ("chip", ctypes.c_wchar * 260)]
+
+        class CL(ctypes.Structure):
+            _fields_ = [("h", wintypes.UINT)]
+
+        e = ENUM(0, None)
+        g.D3DKMTEnumAdapters2(ctypes.byref(e))
+        n = max(1, min(int(e.n), 64))
+        arr = (INFO * n)()
+        e.n, e.p = n, ctypes.cast(arr, ctypes.c_void_p)
+        if g.D3DKMTEnumAdapters2(ctypes.byref(e)) == 0:
+            for i in range(e.n):
+                a = arr[i]
+                r = REG()
+                q = QRY(a.h, 8, ctypes.cast(ctypes.byref(r), ctypes.c_void_p), ctypes.sizeof(r))      # KMTQAITYPE_ADAPTERREGISTRYINFO
+                name = r.name if g.D3DKMTQueryAdapterInfo(ctypes.byref(q)) == 0 and r.name else "Basic render adapter (software)"
+                out[f"0x{a.high & 0xFFFFFFFF:08X}_0x{a.low:08X}"] = {"name": name, "vram": 0}
+                g.D3DKMTCloseAdapter(ctypes.byref(CL(a.h)))
+    except Exception as ex:
+        print("gpu adapters error:", ex, file=sys.stderr)
+    try:                                                              # video memory size from the display-adapter class key
+        import winreg
+        base = r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, base) as k:
+            for i in range(winreg.QueryInfoKey(k)[0]):
+                try:
+                    with winreg.OpenKey(k, winreg.EnumKey(k, i)) as sk:
+                        desc = None
+                        for nm in ("HardwareInformation.AdapterString", "DriverDesc"):
+                            try:
+                                v = winreg.QueryValueEx(sk, nm)[0]
+                                desc = v.decode("utf-16-le", "ignore").strip("\x00") if isinstance(v, bytes) else str(v)
+                                break
+                            except OSError:
+                                pass
+                        mem = 0
+                        for nm in ("HardwareInformation.qwMemorySize", "HardwareInformation.MemorySize"):
+                            try:
+                                v = winreg.QueryValueEx(sk, nm)[0]
+                                mem = int.from_bytes(v, "little") if isinstance(v, bytes) else int(v)
+                                break
+                            except OSError:
+                                pass
+                        for a in out.values():
+                            if desc and a["name"] and desc.strip() == a["name"].strip() and mem:
+                                a["vram"] = mem
+                except OSError:
+                    continue
+    except Exception:
+        pass
+    return out
+
+
 def _gpu_loop():
-    """Total GPU utilisation from the Windows "GPU Engine" performance counters (any vendor). Like Task Manager, the busiest
-    engine type (3D, Copy, Video…) of the busiest adapter is the figure shown."""
+    """Samples the GPU counters about once a second and keeps the latest per-adapter / per-app figures in GPU."""
     pdh = ctypes.WinDLL("pdh")
 
     class VAL(ctypes.Structure):
@@ -2347,42 +2429,122 @@ def _gpu_loop():
     pdh.PdhCollectQueryData.argtypes = [PV]
     pdh.PdhCloseQuery.argtypes = [PV]
     pdh.PdhGetFormattedCounterArrayW.argtypes = [PV, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD), PV]
-    rx = re.compile(r"luid_(0x[0-9a-fA-F]+_0x[0-9a-fA-F]+)_phys_\d+_eng_\d+_engtype_(\w+)")
-    q = c = None
-    born = 0.0
+    paths = {"eng": r"\GPU Engine(*)\Utilization Percentage", "pded": r"\GPU Process Memory(*)\Dedicated Usage",
+             "pshr": r"\GPU Process Memory(*)\Shared Usage", "aded": r"\GPU Adapter Memory(*)\Dedicated Usage",
+             "ashr": r"\GPU Adapter Memory(*)\Shared Usage"}
+    r_eng = re.compile(r"pid_(\d+)_luid_(0x[0-9a-fA-F]+_0x[0-9a-fA-F]+)_phys_\d+_eng_\d+_engtype_(.+)")
+    r_pm = re.compile(r"pid_(\d+)_luid_(0x[0-9a-fA-F]+_0x[0-9a-fA-F]+)_phys_\d+")
+    r_am = re.compile(r"luid_(0x[0-9a-fA-F]+_0x[0-9a-fA-F]+)_phys_\d+")
+
+    def read(c):
+        size, count = wintypes.DWORD(0), wintypes.DWORD(0)
+        pdh.PdhGetFormattedCounterArrayW(c, 0x200, ctypes.byref(size), ctypes.byref(count), None)      # PDH_FMT_DOUBLE: ask for the size
+        if not size.value:
+            return []
+        buf = ctypes.create_string_buffer(size.value)
+        if pdh.PdhGetFormattedCounterArrayW(c, 0x200, ctypes.byref(size), ctypes.byref(count), buf) != 0:
+            return []
+        arr = ctypes.cast(buf, ctypes.POINTER(ITEM))
+        return [(arr[k].name or "", arr[k].val.v) for k in range(count.value) if arr[k].val.status in (0, 1)]
+
+    q, cs, born, adapters_at = None, {}, 0.0, 0.0
     while True:
         try:
-            if q is None or time.time() - born > 30:          # re-enumerate now and then: processes (and their engines) come and go
+            if time.time() - adapters_at > 120 or not GPU.adapters:
+                adapters_at = time.time()
+                found = _gpu_adapters()
+                if found:
+                    GPU.adapters = found
+            if q is None or time.time() - born > 30:                 # re-enumerate now and then: processes (and their engines) come and go
                 if q:
                     pdh.PdhCloseQuery(q)
-                q, c = PV(), PV()
-                if pdh.PdhOpenQueryW(None, None, ctypes.byref(q)) or \
-                        pdh.PdhAddEnglishCounterW(q, "\\GPU Engine(*)\\Utilization Percentage", None, ctypes.byref(c)):
+                q, cs = PV(), {}
+                if pdh.PdhOpenQueryW(None, None, ctypes.byref(q)):
                     q = None
+                else:
+                    for key, path in paths.items():
+                        c = PV()
+                        if pdh.PdhAddEnglishCounterW(q, path, None, ctypes.byref(c)) == 0:
+                            cs[key] = c
+                if "eng" not in cs:                                  # no GPU counters on this machine
+                    if q:
+                        pdh.PdhCloseQuery(q)
+                    q = None
+                    GPU.ok, GPU.reason = False, "No GPU performance counters on this PC (needs Windows 10 1709 or newer and a WDDM 2.0 driver)."
                     PILL["gpu"] = None
-                    time.sleep(60)                              # no GPU counters on this machine
+                    time.sleep(60)
                     continue
                 born = time.time()
                 pdh.PdhCollectQueryData(q)
                 time.sleep(1.0)
             pdh.PdhCollectQueryData(q)
-            size, count = wintypes.DWORD(0), wintypes.DWORD(0)
-            pdh.PdhGetFormattedCounterArrayW(c, 0x200, ctypes.byref(size), ctypes.byref(count), None)     # PDH_FMT_DOUBLE; asks for the size
-            if size.value:
-                buf = ctypes.create_string_buffer(size.value)
-                if pdh.PdhGetFormattedCounterArrayW(c, 0x200, ctypes.byref(size), ctypes.byref(count), buf) == 0:
-                    arr = ctypes.cast(buf, ctypes.POINTER(ITEM))
-                    tot = {}
-                    for k in range(count.value):
-                        it = arr[k]
-                        m = rx.search(it.name or "")
-                        if m and it.val.status in (0, 0x00000001):
-                            tot[m.groups()] = tot.get(m.groups(), 0.0) + it.val.v
-                    PILL["gpu"] = min(100.0, max(tot.values())) if tot else 0.0
+            eng_pid, eng_ad = {}, {}
+            for name, v in read(cs["eng"]):
+                m = r_eng.search(name)
+                if m:
+                    pid, luid, typ = int(m.group(1)), m.group(2), m.group(3)
+                    eng_pid[(pid, luid, typ)] = eng_pid.get((pid, luid, typ), 0.0) + v
+                    eng_ad[(luid, typ)] = eng_ad.get((luid, typ), 0.0) + v
+            mem_p = {}
+            for key, field in (("pded", "ded"), ("pshr", "shared")):
+                for name, v in read(cs[key]) if key in cs else []:
+                    m = r_pm.search(name)
+                    if m:
+                        mem_p.setdefault((int(m.group(1)), m.group(2)), {"ded": 0.0, "shared": 0.0})[field] += v
+            mem_a = {}
+            for key, field in (("aded", "ded"), ("ashr", "shared")):
+                for name, v in read(cs[key]) if key in cs else []:
+                    m = r_am.search(name)
+                    if m:
+                        mem_a.setdefault(m.group(1), {"ded": 0.0, "shared": 0.0})[field] = v
+            live = {}
+            for luid in {k[0] for k in eng_ad} | set(mem_a):
+                eng = {t: min(100.0, v) for (l, t), v in eng_ad.items() if l == luid}
+                live[luid] = {"util": max(eng.values()) if eng else 0.0, "engines": eng,
+                              "ded": mem_a.get(luid, {}).get("ded", 0.0), "shared": mem_a.get(luid, {}).get("shared", 0.0)}
+            per_pid = {}                                              # (pid, luid) -> utilisation: the busiest engine type of that process
+            for (pid, luid, typ), v in eng_pid.items():
+                per_pid[(pid, luid)] = max(per_pid.get((pid, luid), 0.0), v)
+            apps = {}
+            for (pid, luid) in set(per_pid) | set(mem_p):
+                util = per_pid.get((pid, luid), 0.0)
+                mem = mem_p.get((pid, luid), {"ded": 0.0, "shared": 0.0})
+                if util < 0.05 and mem["ded"] < 1048576 and mem["shared"] < 1048576:
+                    continue
+                a = apps.setdefault(_bw_name(pid), {"procs": set(), "gpus": {}})
+                a["procs"].add(pid)
+                gv = a["gpus"].setdefault(luid, {"util": 0.0, "ded": 0.0, "shared": 0.0})
+                gv["util"] += util
+                gv["ded"] += mem["ded"]
+                gv["shared"] += mem["shared"]
+            for a in apps.values():
+                a["procs"] = len(a["procs"])
+            now_t = time.time()
+            with GPU.lock:
+                GPU.live, GPU.apps, GPU.ok, GPU.reason = live, apps, True, ""
+                for luid, v in live.items():
+                    GPU.hist.setdefault(luid, deque(maxlen=300)).append((round(v["util"], 1), int(v["ded"])))
+            PILL["gpu"] = min(100.0, max((v["util"] for v in live.values()), default=0.0))
         except Exception as ex:
             print("gpu error:", ex, file=sys.stderr)
             PILL["gpu"] = None
         time.sleep(1.0)
+
+
+def gpu_payload():
+    with GPU.lock:
+        live, apps, hist = dict(GPU.live), dict(GPU.apps), {k: list(v) for k, v in GPU.hist.items()}
+    adapters = []
+    for luid, v in sorted(live.items(), key=lambda kv: -kv[1]["util"]):
+        info = GPU.adapters.get(luid, {"name": "GPU " + luid[-8:], "vram": 0})
+        if v["util"] == 0 and v["ded"] == 0 and v["shared"] == 0 and not any(luid in a["gpus"] for a in apps.values()):
+            continue
+        adapters.append({"luid": luid, "name": info["name"], "vram": info["vram"], "util": round(v["util"], 1),
+                         "engines": {k: round(x, 1) for k, x in v["engines"].items() if x >= 0.05}, "ded": int(v["ded"]),
+                         "shared": int(v["shared"]), "hist": hist.get(luid, [])})
+    rows = [{"name": n, "procs": a["procs"], "gpus": {l: {"util": round(g["util"], 1), "ded": int(g["ded"]), "shared": int(g["shared"])}
+                                                      for l, g in a["gpus"].items()}} for n, a in apps.items()]
+    return {"available": GPU.ok, "reason": GPU.reason, "adapters": adapters, "apps": rows}
 
 
 class _GpRectF(ctypes.Structure):
