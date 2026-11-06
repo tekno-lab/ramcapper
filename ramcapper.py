@@ -26,6 +26,14 @@ from urllib.parse import parse_qs, urlparse
 
 import psutil
 
+try:                                    # before any window exists, so the notch is drawn at native resolution
+    ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))      # per-monitor v2
+except Exception:
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        pass
+
 VERSION = "1.5.0"
 FROZEN = getattr(sys, "frozen", False)
 HERE = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))   # bundled resources
@@ -2329,7 +2337,7 @@ def _pill_thread():
         "GdipGraphicsClear": [PV, U], "GdipCreatePath": [I, PP(PV)], "GdipDeletePath": [PV],
         "GdipAddPathArc": [PV, F, F, F, F, F, F], "GdipAddPathLine": [PV, F, F, F, F],
         "GdipCreateSolidFill": [U, PP(PV)], "GdipDeleteBrush": [PV], "GdipCreatePen1": [U, F, I, PP(PV)], "GdipDeletePen": [PV],
-        "GdipSetPenLineCap197819": [PV, I, I, I], "GdipSetPenLineJoin": [PV, I],
+        "GdipSetPenLineCap197819": [PV, I, I, I], "GdipSetPenLineJoin": [PV, I], "GdipSetCompositingQuality": [PV, I],
         "GdipFillPath": [PV, PV, PV], "GdipDrawPath": [PV, PV, PV], "GdipFillEllipse": [PV, PV, F, F, F, F],
         "GdipDrawLine": [PV, PV, F, F, F, F], "GdipDrawCurve": [PV, PV, PV, I],
         "GdipCreateFontFamilyFromName": [wintypes.LPCWSTR, PV, PP(PV)], "GdipCreateFont": [PV, F, I, I, PP(PV)],
@@ -2423,8 +2431,9 @@ def _pill_thread():
         if not got:
             return False
         items, level, alarm = got
-        H, e, r = S_(34), S_(9), S_(15)                             # height, ear (concave top corners), bottom corner radius
-        padx, gap, sep = S_(15), S_(9), S_(13)
+        H, m, r = S_(36), S_(2), S_(16)                             # height, margin for the rim, bottom corner radius
+        e = m
+        padx, gap, sep = S_(16), S_(9), S_(13)
         widths = [S_(9) if it[0] == "dot" else S_(60) if it[0] == "spark" else sep if it[0] == "sep" else measure(it[1], it[3]) for it in items]
         W = max(S_(140), 2 * e + 2 * padx + sum(widths) + gap * (len(items) - 1))
         bi = _BMIH(ctypes.sizeof(_BMIH), W, -H, 1, 32, 0, 0, 0, 0, 0, 0)
@@ -2442,26 +2451,28 @@ def _pill_thread():
         g = PV()
         gp.GdipGetImageGraphicsContext(bmp, ctypes.byref(g))
         st["bmp"], st["g"] = bmp, g
-        gp.GdipSetSmoothingMode(g, 4)                                # anti-alias
-        gp.GdipSetTextRenderingHint(g, 4)
+        gp.GdipSetSmoothingMode(g, 5)                                # anti-alias, 8x8 sub-pixel sampling
+        gp.GdipSetCompositingQuality(g, 2)
+        gp.GdipSetTextRenderingHint(g, 3)                            # anti-aliased, grid-fitted (crisp) text
         gp.GdipSetPixelOffsetMode(g, 2)
         gp.GdipGraphicsClear(g, 0)
-        # the notch outline: flush with the top edge, concave "ears" where it meets the screen, rounded bottom corners
+        # the notch: straight sides coming down from the top edge, rounded bottom corners. The outline is inset by half the
+        # rim width so the rim is fully inside the bitmap (a stroke centred on the edge would be half clipped and look soft).
+        rim = max(1.0, round(1.5 * scale))
+        o = rim / 2.0 + m / 2.0
         path = PV()
         gp.GdipCreatePath(0, ctypes.byref(path))
-        gp.GdipAddPathArc(path, F(W - e), F(0), F(2 * e), F(2 * e), F(-90), F(-90))            # right ear
-        gp.GdipAddPathLine(path, F(W - e), F(e), F(W - e), F(H - r))
-        gp.GdipAddPathArc(path, F(W - e - 2 * r), F(H - 2 * r), F(2 * r), F(2 * r), F(0), F(90))   # bottom right
-        gp.GdipAddPathLine(path, F(W - e - r), F(H), F(e + r), F(H))
-        gp.GdipAddPathArc(path, F(e), F(H - 2 * r), F(2 * r), F(2 * r), F(90), F(90))             # bottom left
-        gp.GdipAddPathLine(path, F(e), F(H - r), F(e), F(e))
-        gp.GdipAddPathArc(path, F(-e), F(0), F(2 * e), F(2 * e), F(0), F(-90))                  # left ear
+        gp.GdipAddPathLine(path, F(o), F(-6), F(o), F(H - o - r))                                  # left side (starts above the screen edge)
+        gp.GdipAddPathArc(path, F(o), F(H - o - 2 * r), F(2 * r), F(2 * r), F(180), F(-90))        # bottom left
+        gp.GdipAddPathLine(path, F(o + r), F(H - o), F(W - o - r), F(H - o))
+        gp.GdipAddPathArc(path, F(W - o - 2 * r), F(H - o - 2 * r), F(2 * r), F(2 * r), F(90), F(-90))   # bottom right
+        gp.GdipAddPathLine(path, F(W - o), F(H - o - r), F(W - o), F(-6))                         # right side
         fillb = brush(PILL_COL["bg"])
         gp.GdipFillPath(g, fillb, path)
         gp.GdipDeleteBrush(fillb)
         col = PILL_COL[level]
-        glow = (col & 0x00FFFFFF) | ((255 if alarm and int(time.time() * 1.6) % 2 else 150) << 24)
-        po = pen(glow, 1.6 * scale)
+        glow = (col & 0x00FFFFFF) | ((255 if alarm and int(time.time() * 1.6) % 2 else 215) << 24)
+        po = pen(glow, rim)
         gp.GdipDrawPath(g, po, path)                                 # coloured rim (not along the top edge)
         gp.GdipDeletePen(po)
         gp.GdipDeletePath(path)
