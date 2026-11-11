@@ -12,7 +12,8 @@
 .ev-updated{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 45%,transparent);background:color-mix(in srgb,var(--accent) 12%,transparent)}
 .ev-uninstalled{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 45%,transparent);background:color-mix(in srgb,var(--bad) 12%,transparent)}
 .ev-installer{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 45%,transparent);background:color-mix(in srgb,var(--warn) 12%,transparent)}
-.avatar{width:26px;height:26px;border-radius:7px;display:grid;place-items:center;font-weight:700;font-size:12px;color:#fff;flex:none}
+.avatar{width:26px;height:26px;border-radius:7px;display:grid;place-items:center;font-weight:700;font-size:12px;color:#fff;flex:none;position:relative}
+.avatar .pico{position:absolute;inset:0;width:26px;height:26px;object-fit:contain}
 .fp h4{margin:16px 0 6px;font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted)}
 .fp ul{list-style:none;margin:0;padding:0}
 .fp li{display:flex;gap:10px;align-items:center;padding:5px 0;border-bottom:1px solid var(--line2);font-size:12.5px;word-break:break-all}
@@ -57,7 +58,7 @@
 <script>
 let D=null,LOGROWS=[],PROGS=[];
 const hue=n=>{let h=0;for(const c of n)h=(h*31+c.charCodeAt(0))%360;return h};
-const avatar=n=>`<span class="avatar" style="background:hsl(${hue(n)} 55% 48%)">${esc((n.trim()[0]||'?').toUpperCase())}</span>`;
+const avatar=(n,id)=>`<span class="avatar" style="background:hsl(${hue(n)} 55% 48%)">${esc((n.trim()[0]||'?').toUpperCase())}${id?`<img class="pico" loading="lazy" src="/api/installs/icon?id=${encodeURIComponent(id)}" alt="" onerror="this.remove()" onload="this.parentNode.style.background='none';this.parentNode.firstChild.textContent=''">`:''}</span>`;
 const KLABEL={installed:'Installed',updated:'Updated',uninstalled:'Removed',installer:'Installer ran'};
 const fmtDay=ts=>new Date(ts*1000).toLocaleDateString([], {year:'numeric',month:'short',day:'numeric'});
 const fmtWhen=ts=>new Date(ts*1000).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
@@ -71,14 +72,14 @@ function applyModules(){
 const logDT=DataTable($('#log-t'),{key:'instlog',sort:'when',dir:-1,empty:'Nothing yet – install or remove a program and it shows up here.',limit:150,cols:[
   {id:'when',label:'When',val:r=>r.ts,render:r=>`<span class="sub">${fmtWhen(r.ts)}</span>`},
   {id:'ev',label:'Event',val:r=>r.kind,first:'asc',render:r=>`<span class="ev-badge ev-${r.kind}">${KLABEL[r.kind]||esc(r.kind)}</span>`},
-  {id:'name',label:'Program',fixed:true,val:r=>r.name,first:'asc',render:r=>`<div class="name">${avatar(r.name)}<b>${esc(r.name)}</b></div>`},
+  {id:'name',label:'Program',fixed:true,val:r=>r.name,first:'asc',render:r=>`<div class="name">${avatar(r.name,r.pid)}<b>${esc(r.name)}</b></div>`},
   {id:'ver',label:'Version',val:r=>r.version,first:'asc',render:r=>esc(r.version||'–')+(r.detail&&r.detail.old_version?` <span class="sub">(was ${esc(r.detail.old_version)})</span>`:'')},
   {id:'pub',label:'Publisher',off:true,val:r=>r.publisher,first:'asc',render:r=>esc(r.publisher||'–')},
   {id:'info',label:'Details',th:'r',td:'r',fixed:true,render:r=>{const d=r.detail||{},fp=d.footprint||{},n=Object.values(fp).reduce((a,v)=>a+v.length,0),lf=(d.leftovers||[]).length;
     return r.kind==='uninstalled'?`<button class="btn sm" data-log="${r.id}">${lf?lf+' leftover'+(lf>1?'s':''):'Leftovers…'}</button>`:`<button class="btn sm" data-log="${r.id}">${n?n+' change'+(n>1?'s':''):'Details'}</button>`}},
 ]});
 const progDT=DataTable($('#prog-t'),{key:'instprogs',sort:'ts',dir:-1,empty:'No programs found',limit:500,cols:[
-  {id:'name',label:'Program',fixed:true,val:r=>r.name,first:'asc',render:r=>`<div class="name">${avatar(r.name)}<b>${esc(r.name)}</b>${r.recent?'<span class="badge new">NEW</span>':''}</div>`},
+  {id:'name',label:'Program',fixed:true,val:r=>r.name,first:'asc',render:r=>`<div class="name">${avatar(r.name,r.id)}<b>${esc(r.name)}</b>${r.recent?'<span class="badge new">NEW</span>':''}</div>`},
   {id:'pub',label:'Publisher',val:r=>r.publisher,first:'asc',render:r=>esc(r.publisher||'–')},
   {id:'ver',label:'Version',val:r=>r.version,first:'asc',render:r=>esc(r.version||'–')},
   {id:'date',label:'Installed',val:r=>r.ts,render:r=>fmtDay(r.ts)},

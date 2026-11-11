@@ -34,7 +34,7 @@ except Exception:
     except Exception:
         pass
 
-VERSION = "1.11.0"
+VERSION = "1.11.1"
 FROZEN = getattr(sys, "frozen", False)
 HERE = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))   # bundled resources
 APP_DIR = os.path.dirname(sys.executable) if FROZEN else os.path.dirname(os.path.abspath(__file__))
@@ -674,7 +674,7 @@ def _read_programs():
                     with winreg.OpenKey(root, sub, 0, winreg.KEY_READ | view) as sk:
                         v = {}
                         for nm in ("DisplayName", "DisplayVersion", "Publisher", "InstallDate", "InstallLocation", "UninstallString", "EstimatedSize",
-                                   "SystemComponent", "ParentKeyName", "ReleaseType"):
+                                   "SystemComponent", "ParentKeyName", "ReleaseType", "DisplayIcon"):
                             try:
                                 v[nm] = winreg.QueryValueEx(sk, nm)[0]
                             except OSError:
@@ -698,7 +698,7 @@ def _read_programs():
                     size = 0
                 out[f"{tag}|{sub}"] = {"id": f"{tag}|{sub}", "name": name, "version": str(v.get("DisplayVersion", "")), "publisher": str(v.get("Publisher", "")),
                                        "location": str(v.get("InstallLocation", "")).strip('" '), "uninstall": str(v.get("UninstallString", "")),
-                                       "size": size, "ts": ts}
+                                       "size": size, "ts": ts, "icon": str(v.get("DisplayIcon", ""))}
     return out
 
 
@@ -984,6 +984,78 @@ def uninstall_program(pid):
         cmd = re.sub(r"(?i)/i", "/X", cmd, count=1)                           # Windows' own "uninstall" for MSI entries
     subprocess.Popen(cmd, shell=True, creationflags=0x00000008 | 0x00000200, close_fds=True)
     log_event("install", e["name"], "Started its uninstaller")
+
+
+PROG_ICONS = {}          # program id -> PNG bytes (or b"" when it has no usable icon)
+
+
+def _icon_from_spec(spec):
+    """DisplayIcon looks like  "C:\\app\\app.exe",0  /  C:\\app\\app.ico  /  C:\\Windows\\Installer\\{GUID}\\icon.exe,-12"""
+    m = re.match(r'^\s*"?([^",]+?)"?\s*(?:,\s*(-?\d+))?\s*$', os.path.expandvars(spec or ""))
+    if not m or not os.path.isfile(m.group(1)):
+        return None
+    return _extract_icon(m.group(1), int(m.group(2) or 0))
+
+
+def _best_exe(folder, name):
+    """The program's main executable inside its install folder (skips uninstallers and helpers)."""
+    cands = []
+    for base in (folder, os.path.join(folder, "bin")):
+        try:
+            for f in os.listdir(base):
+                low = f.lower()
+                if low.endswith(".exe") and not re.match(r"(unins|uninst|setup|install|update|crash|helper|vc_redist|dxsetup)", low):
+                    cands.append(os.path.join(base, f))
+        except OSError:
+            pass
+    if not cands:
+        return None
+    nn = _norm(name)
+    cands.sort(key=lambda c: (-(len(_norm(os.path.basename(c)[:-4])) >= 3 and (_norm(os.path.basename(c)[:-4]) in nn or nn[:6] in _norm(os.path.basename(c)))), -os.path.getsize(c)))
+    return cands[0]
+
+
+def program_icon(pid):
+    """The program's real icon as PNG bytes, or None (the page then shows a letter badge)."""
+    if pid in PROG_ICONS:
+        return PROG_ICONS[pid] or None
+    e = Inst.programs.get(pid)
+    if not e:
+        return None
+    png = None
+    with icon_lock:
+        try:
+            png = _icon_from_spec(e.get("icon", ""))
+            if not png and e["location"] and os.path.isdir(e["location"]):
+                exe = _best_exe(e["location"], e["name"])
+                png = _extract_icon(exe, 0) if exe else None
+            if not png:                                                      # Windows Installer (MSI) products keep their icon in C:\Windows\Installer\{GUID}\
+                g = re.search(r"\{[0-9A-Fa-f]{8}-(?:[0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}\}", e["uninstall"] or "") or re.search(r"\{[0-9A-Fa-f-]{36}\}", pid)
+                if g:
+                    folder = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "Installer", g.group(0))
+                    try:
+                        for f in sorted(os.listdir(folder), key=lambda x: (not x.lower().endswith(".ico"), x)):
+                            if f.lower().endswith((".ico", ".exe")):
+                                png = _extract_icon(os.path.join(folder, f), 0)
+                                if png:
+                                    break
+                    except OSError:
+                        pass
+            if not png:
+                m = re.match(r'^\s*"?([^"]+?\.exe)', os.path.expandvars(e["uninstall"] or ""), re.I)
+                if m and os.path.isfile(m.group(1)) and "msiexec" not in m.group(1).lower():
+                    folder = os.path.dirname(m.group(1))
+                    exe = _best_exe(folder, e["name"])
+                    if not exe:                                              # Squirrel-style apps (Discord, Slack…): the real exe is in app-<version>\
+                        for sub in sorted((d for d in os.listdir(folder) if d.lower().startswith("app-")), reverse=True) if os.path.isdir(folder) else []:
+                            exe = _best_exe(os.path.join(folder, sub), e["name"])
+                            if exe:
+                                break
+                    png = (_extract_icon(exe, 0) if exe else None) or _extract_icon(m.group(1), 0)
+        except Exception:
+            png = None
+    PROG_ICONS[pid] = png or b""
+    return png
 
 
 def open_install_path(path):
@@ -2130,6 +2202,17 @@ class Handler(BaseHTTPRequestHandler):
                                         "db_size": size, "frozen": FROZEN, "port": PORT, "version": VERSION, "minibar": pill_mode(), "notch_side": pill_side(), "notch_behavior": pill_behavior(),
                                         "notch_opacity": max(25, min(100, int(CFG.get("notch_opacity", 100)))), "window_maximized": bool(CFG.get("window_maximized", True)),
                                         "install": install_info()})
+            if u.path == "/api/installs/icon":
+                png = program_icon(q.get("id", ""))
+                if not png:
+                    return self._send(404, {"error": "no icon"})
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Content-Length", str(len(png)))
+                self.send_header("Cache-Control", "private, max-age=3600")
+                self.end_headers()
+                self.wfile.write(png)
+                return
             if u.path == "/api/installs":
                 return self._send(200, installs_payload())
             if u.path == "/api/install":
@@ -2779,8 +2862,7 @@ def start_tray(first_balloon):
 PILL_MODES = ("off", "minimized", "hidden", "desktop", "always")
 PILL = {"near_until": 0.0, "eligible": False, "last_want": False, "hwnd": None, "flash": ("", 0.0), "preview": 0.0, "hist": deque(maxlen=60), "tick": 0, "shown": False, "anim": None,
         "frame": None}
-gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
-MB_ = 1048576
+MB_ = 1048576          # (gdi32 is the handle created for the icon code above; re-creating it here would drop its argument types)
 GB_ = 1073741824
 
 
