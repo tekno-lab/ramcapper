@@ -194,3 +194,5 @@ td.r{white-space:nowrap}
 .top+.card,.gcards+.card,.top+.grid2,.gcards+.grid2,.grid2+.top,.card+.top,.card+.gcards{margin-top:16px}
 
 .badge.ours{color:var(--accent);border-color:var(--accent)}
+
+.k.install{color:#e5609a}

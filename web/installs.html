@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RamCapper</title>
+<link rel="icon" type="image/png" href="/logo.png">
+<link rel="stylesheet" href="/app.css">
+<style>
+.ev-badge{display:inline-block;font-size:11.5px;font-weight:650;padding:1px 9px;border-radius:99px;border:1px solid}
+.ev-installed{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 45%,transparent);background:color-mix(in srgb,var(--ok) 12%,transparent)}
+.ev-updated{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 45%,transparent);background:color-mix(in srgb,var(--accent) 12%,transparent)}
+.ev-uninstalled{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 45%,transparent);background:color-mix(in srgb,var(--bad) 12%,transparent)}
+.ev-installer{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 45%,transparent);background:color-mix(in srgb,var(--warn) 12%,transparent)}
+.avatar{width:26px;height:26px;border-radius:7px;display:grid;place-items:center;font-weight:700;font-size:12px;color:#fff;flex:none}
+.fp h4{margin:16px 0 6px;font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted)}
+.fp ul{list-style:none;margin:0;padding:0}
+.fp li{display:flex;gap:10px;align-items:center;padding:5px 0;border-bottom:1px solid var(--line2);font-size:12.5px;word-break:break-all}
+.fp li span{flex:1}
+</style>
+</head>
+<body data-page="installs" data-title="Installs">
+<script src="/app.js"></script>
+<main class="main">
+  <header class="phead">
+    <div class="grow"><h1>Installs</h1><p>Watches software being installed, updated and removed – what changed, when, and what an uninstall left behind. Nothing runs while this is off, and nothing is ever deleted.</p></div>
+    <div class="pact"><span class="sub" id="m-lbl">Off</span><label class="sw"><input type="checkbox" data-mod="installs"><s></s></label></div>
+  </header>
+
+  <div class="card empty" id="off">Turn the switch on to start watching. RamCapper reads Windows' list of installed programs every few seconds, notices installers while they run, and records the folders, auto-start entries, services, scheduled tasks and shortcuts each install adds.</div>
+  <div id="on" class="hide">
+    <div class="banner hide" id="ins-now" style="margin-bottom:16px"></div>
+    <div class="stats4">
+      <div class="stat"><span>Installed programs</span><b id="s-count">–</b></div>
+      <div class="stat"><span>Added in the last 7 days</span><b id="s-new">–</b></div>
+      <div class="stat"><span>Removed in the last 7 days</span><b id="s-del">–</b></div>
+      <div class="stat"><span>Monitor</span><b id="s-mon" style="font-size:15px">–</b></div>
+    </div>
+    <div class="card">
+      <div class="row"><div class="grow"><h3>Activity</h3><div class="sub">Installs, updates and removals seen while the monitor was on. Click a row for the footprint (what the install added) or the leftovers (what an uninstall didn't remove).</div></div>
+        <select id="ev-kind"><option value="">All events</option><option value="installed">Installed</option><option value="updated">Updated</option><option value="uninstalled">Removed</option><option value="installer">Installer ran</option></select></div>
+      <table id="log-t" style="margin-top:8px"></table>
+    </div>
+    <div class="card">
+      <div class="toolbar"><h3 style="margin:0">Installed programs</h3><input type="text" class="search" id="p-search" placeholder="Filter programs…"><span class="sub" id="p-sub"></span></div>
+      <table id="prog-t"></table>
+    </div>
+  </div>
+</main>
+
+<aside class="drawer" id="drawer">
+  <div class="row"><h2 id="d-name" class="grow"></h2><button class="btn sm" id="d-close">Close ✕</button></div>
+  <div class="sub" id="d-sub"></div>
+  <div class="fp" id="d-body"></div>
+</aside>
+
+<script>
+let D=null,LOGROWS=[],PROGS=[];
+const hue=n=>{let h=0;for(const c of n)h=(h*31+c.charCodeAt(0))%360;return h};
+const avatar=n=>`<span class="avatar" style="background:hsl(${hue(n)} 55% 48%)">${esc((n.trim()[0]||'?').toUpperCase())}</span>`;
+const KLABEL={installed:'Installed',updated:'Updated',uninstalled:'Removed',installer:'Installer ran'};
+const fmtDay=ts=>new Date(ts*1000).toLocaleDateString([], {year:'numeric',month:'short',day:'numeric'});
+const fmtWhen=ts=>new Date(ts*1000).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
+function applyModules(){
+  const on=mod('installs');
+  document.querySelector('[data-mod=installs]').checked=on;
+  $('#m-lbl').textContent=on?'Active':'Off';
+  $('#off').classList.toggle('hide',on);$('#on').classList.toggle('hide',!on);
+  if(on)poll();
+}
+const logDT=DataTable($('#log-t'),{key:'instlog',sort:'when',dir:-1,empty:'Nothing yet – install or remove a program and it shows up here.',limit:150,cols:[
+  {id:'when',label:'When',val:r=>r.ts,render:r=>`<span class="sub">${fmtWhen(r.ts)}</span>`},
+  {id:'ev',label:'Event',val:r=>r.kind,first:'asc',render:r=>`<span class="ev-badge ev-${r.kind}">${KLABEL[r.kind]||esc(r.kind)}</span>`},
+  {id:'name',label:'Program',fixed:true,val:r=>r.name,first:'asc',render:r=>`<div class="name">${avatar(r.name)}<b>${esc(r.name)}</b></div>`},
+  {id:'ver',label:'Version',val:r=>r.version,first:'asc',render:r=>esc(r.version||'–')+(r.detail&&r.detail.old_version?` <span class="sub">(was ${esc(r.detail.old_version)})</span>`:'')},
+  {id:'pub',label:'Publisher',off:true,val:r=>r.publisher,first:'asc',render:r=>esc(r.publisher||'–')},
+  {id:'info',label:'Details',th:'r',td:'r',fixed:true,render:r=>{const d=r.detail||{},fp=d.footprint||{},n=Object.values(fp).reduce((a,v)=>a+v.length,0),lf=(d.leftovers||[]).length;
+    return r.kind==='uninstalled'?`<button class="btn sm" data-log="${r.id}">${lf?lf+' leftover'+(lf>1?'s':''):'Leftovers…'}</button>`:`<button class="btn sm" data-log="${r.id}">${n?n+' change'+(n>1?'s':''):'Details'}</button>`}},
+]});
+const progDT=DataTable($('#prog-t'),{key:'instprogs',sort:'ts',dir:-1,empty:'No programs found',limit:500,cols:[
+  {id:'name',label:'Program',fixed:true,val:r=>r.name,first:'asc',render:r=>`<div class="name">${avatar(r.name)}<b>${esc(r.name)}</b>${r.recent?'<span class="badge new">NEW</span>':''}</div>`},
+  {id:'pub',label:'Publisher',val:r=>r.publisher,first:'asc',render:r=>esc(r.publisher||'–')},
+  {id:'ver',label:'Version',val:r=>r.version,first:'asc',render:r=>esc(r.version||'–')},
+  {id:'date',label:'Installed',val:r=>r.ts,render:r=>fmtDay(r.ts)},
+  {id:'size',label:'Size',th:'r',td:'r',val:r=>r.size,render:r=>r.size?fmtB(r.size):'<span class="sub">–</span>'},
+  {id:'loc',label:'Location',off:true,val:r=>r.location,first:'asc',render:r=>r.location?`<div class="pathcell" title="${esc(r.location)}">&lrm;${esc(r.location)}</div>`:'<span class="sub">–</span>'},
+  {id:'act',label:'Actions',th:'r',td:'r',fixed:true,render:r=>`${r.location?`<button class="btn sm" data-open="${esc(r.location)}">Open folder</button> `:''}${r.can_uninstall?`<button class="btn sm danger" data-un="${esc(r.id)}" data-nm="${esc(r.name)}">Uninstall…</button>`:''}`},
+]});
+function renderAll(){
+  const d=D;if(!d||!d.enabled)return;
+  const week=Date.now()/1000-7*86400;
+  $('#s-count').textContent=d.programs.length||'–';
+  $('#s-new').textContent=d.log.filter(r=>r.kind==='installed'&&r.ts>week).length;
+  $('#s-del').textContent=d.log.filter(r=>r.kind==='uninstalled'&&r.ts>week).length;
+  $('#s-mon').innerHTML=d.primed?`<span class="st on"><i></i>Watching · scan ${new Date(d.scanned*1000).toLocaleTimeString()}</span>`:'<span class="st"><i></i>Taking the first inventory…</span>';
+  const b=$('#ins-now');
+  if(d.installing.length){b.classList.remove('hide');b.innerHTML='<b>An installer is running:</b> '+d.installing.map(esc).join(', ')+' – RamCapper is recording what it changes.'}else b.classList.add('hide');
+  LOGROWS=d.log;PROGS=d.programs;
+  const k=$('#ev-kind').value;
+  logDT.render(d.log.filter(r=>!k||r.kind===k));
+  const q=$('#p-search').value.trim().toLowerCase();
+  const list=d.programs.filter(r=>!q||(r.name+' '+r.publisher).toLowerCase().includes(q));
+  $('#p-sub').textContent=list.length+' of '+d.programs.length+' shown';
+  progDT.render(list);
+}
+async function poll(){
+  if(!mod('installs'))return;
+  try{D=await api('/api/installs');renderAll()}catch(e){}
+}
+function section(title,items,open){
+  if(!items||!items.length)return '';
+  return `<h4>${title} (${items.length})</h4><ul>${items.map(x=>`<li><span>${esc(typeof x==='string'?x:(x.path||x.detail))}</span>${open&&(x.path||typeof x==='string'&&/^[A-Za-z]:\\/.test(x))?`<button class="btn sm" data-open="${esc(x.path||x)}">Open</button>`:''}</li>`).join('')}</ul>`;
+}
+function showLog(id){
+  const r=LOGROWS.find(x=>x.id===id);if(!r)return;
+  const d=r.detail||{},fp=d.footprint||{};
+  $('#d-name').textContent=r.name;
+  $('#d-sub').textContent=`${KLABEL[r.kind]||r.kind} · ${fmtWhen(r.ts)}${r.version?' · '+r.version:''}${r.publisher?' · '+r.publisher:''}`;
+  let h='';
+  if(r.kind==='uninstalled'){
+    h+=(d.leftovers&&d.leftovers.length)?`<div class="sub" style="margin-top:12px">Things that may still be on this PC after the uninstall. RamCapper never deletes them – review and remove what you don't need.</div>`:`<div class="sub" style="margin-top:12px">${d.leftovers?'No leftovers found – the uninstall looks clean.':'Checking for leftovers… (it runs about 20 seconds after the removal)'}</div>`;
+    const L=d.leftovers||[];
+    h+=section('Folders',L.filter(x=>x.kind==='folder'),true)+section('Auto-start entries',L.filter(x=>x.kind==='startup'))+section('Shortcuts',L.filter(x=>x.kind==='shortcut'))+section('Registry keys',L.filter(x=>x.kind==='registry'));
+  }else{
+    if(d.installer)h+=`<div class="sub" style="margin-top:12px">Installer: ${d.installer.map(esc).join(', ')}</div>`;
+    const n=Object.values(fp).reduce((a,v)=>a+v.length,0);
+    h+=n?`<div class="sub" style="margin-top:12px">What appeared on this PC while it was installing${d.approximate?' (approximate – it was installed without a visible installer, so this compares with a snapshot from a few minutes earlier and may include unrelated changes)':''}:</div>`:
+        `<div class="sub" style="margin-top:12px">${r.kind==='installed'?(d.footprint?'No new folders, auto-start entries, services or tasks were detected.':'Collecting the footprint… check again in a moment.'):'Nothing recorded.'}</div>`;
+    h+=section('Folders',fp.folders,true)+section('Auto-start entries',fp.startup)+section('Services',fp.services)+section('Scheduled tasks',fp.tasks)+section('Start menu shortcuts',fp.shortcuts)+section('Registry keys',fp.registry);
+  }
+  $('#d-body').innerHTML=h;$('#drawer').classList.add('open');
+}
+document.body.addEventListener('click',async e=>{
+  const t=e.target.closest('[data-log],[data-open],[data-un]');if(!t)return;const d=t.dataset;
+  if(d.log)showLog(+d.log);
+  else if(d.open){try{await api('/api/installs/open',{path:d.open})}catch(x){toast(x.message)}}
+  else if(d.un){if(confirm(`Uninstall ${d.nm}?\n\nThis starts the program's own uninstaller (the same one Windows' Apps & features uses). RamCapper will list any leftovers once it is gone.`)){try{await api('/api/installs/uninstall',{id:d.un});toast('Uninstaller started')}catch(x){toast(x.message)}}}
+});
+$('#d-close').onclick=()=>$('#drawer').classList.remove('open');
+$('#ev-kind').onchange=renderAll;$('#p-search').oninput=renderAll;
+setInterval(poll,3000);
+boot();
+</script>
+</body>
+</html>

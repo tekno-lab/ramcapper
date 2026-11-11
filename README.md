@@ -14,7 +14,7 @@
 ## Features
 
 ### Memory
-- **Live dashboard** – system gauge plus a stacked timeline of the top apps (5 min → 3 days). Hover for exact values at any moment; limiter actions are marked on the timeline.
+- **Live dashboard** – system gauge plus a stacked timeline of the top apps (5 min → 3 days). Hover for exact values at any moment; limiter actions are marked on the timeline. Gaps while RamCapper (or the PC) was off are shown as gaps, not as a line joining the two ends.
 - **Per-app view** – processes grouped by executable with icons, trend sparklines, 5-minute change and per-process drill-down. **Optimize now** trims idle memory from every reachable process.
 - **Limiter** – set a limit per app (all its processes combined) with one of four actions:
   | Action | What it does |
@@ -34,6 +34,9 @@
 
 ### GPU
 - **GPU tab** – every graphics card (NVIDIA, AMD, Intel) with live utilization, a 5-minute history chart, video-memory use and engine breakdown (3D, Copy, Video…), plus a table showing **how much of each card every app is using** (usage and VRAM per card). Same sortable / hideable columns. No admin needed.
+
+### Installs *(opt-in)*
+- **Install monitor (like IObit's)** – watches Windows' list of installed programs and the installers while they run, and logs every **install, update and removal** with time, version and publisher. Each install gets a **footprint**: the folders, auto-start entries, services, scheduled tasks, Start menu shortcuts and registry keys it added. After an uninstall RamCapper reports **leftovers** that are still on the PC. Browse all installed programs (sortable, hideable columns), open their folders or start their own uninstaller. Everything is read-only – nothing is deleted.
 
 ### Storage *(opt-in)*
 - Scan a drive or folder to see what takes the most space: drill-down folders, largest files, breakdown by file type. Read-only.

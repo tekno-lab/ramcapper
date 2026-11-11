@@ -31,6 +31,7 @@ const NAV=[
   ['limiter','/limiter.html','Limiter','<path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/>'],
   ['network','/network.html','Network','<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.5 3 14.5 0 18M12 3c-3 3.5-3 14.5 0 18"/>'],
   ['gpu','/gpu.html','GPU','<rect x="2.5" y="7" width="19" height="10" rx="2"/><circle cx="14.5" cy="12" r="2.6"/><path d="M6 10.5h3M6 13.5h2"/>'],
+  ['installs','/installs.html','Installs','<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 12l8-4.5M12 12L4 7.5M12 12v9"/>'],
   ['storage','/storage.html','Storage','<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>'],
   ['events','/events.html','Events','<path d="M5 6h14M5 12h14M5 18h9"/>'],
   ['settings','/settings.html','Settings','<circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1"/>'],
@@ -53,6 +54,7 @@ document.body.insertAdjacentHTML('beforeend','<div class="toast" id="toast"></di
 document.title=(document.body.dataset.title||'RamCapper')+' · RamCapper';
 
 /* ---------------------------------------------------------------- charts */
+const gapSeconds=d=>Math.max((d.bucket||5)*3,30);         // a hole longer than this in the recorded samples is a real gap
 function drawChart(cv,d,o={}){
   const dpr=window.devicePixelRatio||1,w=cv.clientWidth,h=cv.clientHeight;
   if(cv.width!==Math.round(w*dpr)||cv.height!==Math.round(h*dpr)){cv.width=Math.round(w*dpr);cv.height=Math.round(h*dpr)}
@@ -75,13 +77,31 @@ function drawChart(cv,d,o={}){
   const ticks=Math.max(2,Math.floor(pw/110));
   for(let i=0;i<=ticks;i++){const t=d.start+(d.end-d.start)*i/ticks;g.fillStyle=muted;g.fillText(fmtT(t),Math.min(w-R-22,Math.max(L+22,X(t))),h-B+7)}
   if(n){
-    vis.forEach((s,k)=>{
-      g.beginPath();
-      for(let i=0;i<n;i++){const x=X(d.t[i]),y=Y(cum[k][i]);i?g.lineTo(x,y):g.moveTo(x,y)}
-      for(let i=n-1;i>=0;i--){g.lineTo(X(d.t[i]),Y(k?cum[k-1][i]:0))}
-      g.closePath();g.fillStyle=colorOf(s.name)+'cc';g.fill();
-      g.beginPath();for(let i=0;i<n;i++){const x=X(d.t[i]),y=Y(cum[k][i]);i?g.lineTo(x,y):g.moveTo(x,y)}
-      g.strokeStyle=colorOf(s.name);g.lineWidth=1.4;g.stroke();
+    /* RamCapper records nothing while it (or the PC) is off. Draw each stretch of data on its own so the chart shows a gap
+       instead of a line joining "before shutdown" to "after startup". */
+    const gapS=gapSeconds(d),runs=[];let a0=0;
+    for(let i=1;i<=n;i++){if(i===n||d.t[i]-d.t[i-1]>gapS){runs.push([a0,i-1]);a0=i}}
+    for(let r=0;r<runs.length-1;r++){          // shade and label the gap between two runs
+      const x1=X(d.t[runs[r][1]]),x2=X(d.t[runs[r+1][0]]);
+      g.fillStyle=muted+'1f';g.fillRect(x1,T,x2-x1,ph);
+      g.strokeStyle=muted+'55';g.lineWidth=1;g.setLineDash([3,4]);g.strokeRect(x1+.5,T+.5,x2-x1-1,ph-1);g.setLineDash([]);
+      if(x2-x1>96){g.fillStyle=muted;g.textAlign='center';g.textBaseline='middle';g.fillText("RamCapper wasn't running",(x1+x2)/2,T+ph/2)}
+    }
+    const px=i=>{const x=X(d.t[i]);return x};
+    runs.forEach(([a,b])=>{
+      const idx=[];for(let i=a;i<=b;i++)idx.push(i);
+      const single=a===b;                       // a lone sample: give it a little width so it is visible
+      const xs=idx.map(i=>single?[px(i)-1.5,px(i)+1.5]:[px(i)]).flat();
+      vis.forEach((s,k)=>{
+        const top=idx.map(i=>Y(cum[k][i])),bot=idx.map(i=>Y(k?cum[k-1][i]:0));
+        const T2=single?[top[0],top[0]]:top,B2=single?[bot[0],bot[0]]:bot;
+        g.beginPath();
+        xs.forEach((x,j)=>{j?g.lineTo(x,T2[j]):g.moveTo(x,T2[j])});
+        for(let j=xs.length-1;j>=0;j--)g.lineTo(xs[j],B2[j]);
+        g.closePath();g.fillStyle=colorOf(s.name)+'cc';g.fill();
+        g.beginPath();xs.forEach((x,j)=>{j?g.lineTo(x,T2[j]):g.moveTo(x,T2[j])});
+        g.strokeStyle=colorOf(s.name);g.lineWidth=1.4;g.stroke();
+      });
     });
   }else{g.fillStyle=muted;g.textAlign='center';g.textBaseline='middle';g.fillText('Collecting data…',L+pw/2,T+ph/2)}
   if(o.threshold){const y=Y(o.threshold);g.setLineDash([5,4]);g.strokeStyle=bad;g.lineWidth=1.2;g.beginPath();g.moveTo(L,y);g.lineTo(w-R,y);g.stroke();g.setLineDash([]);
@@ -100,6 +120,10 @@ function bindHover(cv,tip,getD){
     const r=cv.getBoundingClientRect(),mx=ev.clientX-r.left,my=ev.clientY-r.top;
     const t=d.start+(mx-m.L)/m.pw*(d.end-d.start);
     let best=0,bd=1e18;d.t.forEach((x,i)=>{const dd=Math.abs(x-t);if(dd<bd){bd=dd;best=i}});
+    if(bd>gapSeconds(d)){                       // hovering inside a gap
+      tip.innerHTML=`<div class="h">${fmtT(t,true)}</div><div>RamCapper wasn't running (PC off or app closed) – nothing was recorded.</div>`;tip.style.display='block';
+      const tw=tip.offsetWidth;let left=mx+16;if(left+tw>r.width)left=mx-tw-16;tip.style.left=Math.max(0,left)+'px';tip.style.top=Math.max(0,my-20)+'px';
+      cv._hover=null;cv._redraw&&cv._redraw();return}
     const near=(d.events||[]).find(e=>Math.abs(m.L+(e.ts-d.start)/(d.end-d.start)*m.pw-mx)<7&&my>m.T+m.ph-14);
     let html;
     if(near){html=`<div class="h">${fmtT(near.ts,true)} · ${esc(near.kind)}</div><div>${esc(near.detail)}</div>`}
@@ -143,7 +167,7 @@ async function loadInfo(){
 }
 async function loadEvents(){
   try{const ev=await api('/api/events');
-    if(S.lastEv!=null)ev.filter(e=>e.id>S.lastEv&&['notify','kill','auto','net'].includes(e.kind)).reverse().forEach(e=>toast(`${e.app}: ${e.detail}`));
+    if(S.lastEv!=null)ev.filter(e=>e.id>S.lastEv&&['notify','kill','auto','net','install'].includes(e.kind)).reverse().forEach(e=>toast(`${e.app}: ${e.detail}`));
     if(ev.length)S.lastEv=Math.max(S.lastEv||0,ev[0].id);else if(S.lastEv==null)S.lastEv=0;
     window.onEvents&&window.onEvents(ev)}catch(e){}
 }

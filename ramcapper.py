@@ -34,7 +34,7 @@ except Exception:
     except Exception:
         pass
 
-VERSION = "1.10.0"
+VERSION = "1.11.0"
 FROZEN = getattr(sys, "frozen", False)
 HERE = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))   # bundled resources
 APP_DIR = os.path.dirname(sys.executable) if FROZEN else os.path.dirname(os.path.abspath(__file__))
@@ -209,6 +209,7 @@ CREATE TABLE IF NOT EXISTS sys(ts INTEGER, used INTEGER, total INTEGER, commit_u
 CREATE TABLE IF NOT EXISTS app(ts INTEGER, name TEXT, rss INTEGER, procs INTEGER);
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, kind TEXT, app TEXT, detail TEXT);
 CREATE TABLE IF NOT EXISTS devices(mac TEXT PRIMARY KEY, ip TEXT, host TEXT, first_seen INTEGER, last_seen INTEGER);
+CREATE TABLE IF NOT EXISTS installs_log(id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, kind TEXT, pid TEXT, name TEXT, version TEXT, publisher TEXT, location TEXT, detail TEXT);
 CREATE INDEX IF NOT EXISTS sys_ts ON sys(ts);
 CREATE INDEX IF NOT EXISTS app_ts ON app(ts);
 """)
@@ -238,9 +239,9 @@ def log_event(kind, app, detail):
 
 
 # ---------------------------------------------------------------- config
-MODULES = ("network", "storage")
+MODULES = ("network", "storage", "installs")
 DEFAULT_CFG = {"rules": [], "global": {"enabled": False, "threshold": 90, "cooldown": 60},
-               "modules": {"network": False, "storage": False}}
+               "modules": {"network": False, "storage": False, "installs": False}}
 cfg_lock = threading.Lock()
 
 
@@ -619,6 +620,379 @@ def history(rng, name=None, topn=8):
         return {"start": start, "end": now, "bucket": b, "t": t, "used": used, "total": total, "series": series, "events": events}
     finally:
         db.close()
+
+
+# ---------------------------------------------------------------- install monitor (opt-in, like IObit's "Install Monitor")
+# Watches the Windows list of installed programs (the Uninstall registry keys) and the installer processes, and keeps a log of what
+# was installed, updated or removed. While an installer runs it also compares "before" and "after" snapshots of the places installers
+# write to (program folders, auto-start entries, services, scheduled tasks, Start menu shortcuts, vendor registry keys) so each
+# install gets a footprint, and after an uninstall it looks for leftovers. Everything is read-only; nothing is deleted.
+UNINSTALL_SUBKEY = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
+INSTALL_SCAN_EVERY = 3.0
+INSTALLER_RX = re.compile(r"(?i)^((setup|install|installer|instalar)[\w\-. ]*|[\w\-. ]*(setup|installer))\.exe$")
+INSTALL_NOISE = {"temp", "tmp", "microsoft", "packages", "crashdumps", "d3dscache", "package cache", "windowsapps", "programs", "pip",
+                 "npm-cache", "windows", "local", "locallow", "comms", "publishers", "history", "cache", "caches", "logs"}
+
+
+class Inst:
+    lock = threading.Lock()
+    programs = {}          # id -> entry
+    primed = False
+    on = False
+    session = None         # a running installer: {"t0", "base", "names", "added", "last"}
+    last_snap = 0.0
+    installing = []        # installer processes seen right now
+    scanned = 0.0
+
+
+def _inst_roots():
+    la = os.environ.get("LOCALAPPDATA", "")
+    cand = [os.environ.get("ProgramFiles", r"C:\Program Files"), os.environ.get("ProgramFiles(x86)", ""),
+            os.environ.get("ProgramData", r"C:\ProgramData"), la, os.environ.get("APPDATA", ""), os.path.join(la, "Programs") if la else ""]
+    seen, out = set(), []
+    for p in cand:
+        if p and os.path.isdir(p) and os.path.normcase(p) not in seen:
+            seen.add(os.path.normcase(p))
+            out.append(p)
+    return out
+
+
+def _read_programs():
+    """Installed programs from the Uninstall registry keys (machine 64/32-bit views and the current user)."""
+    import winreg
+    out = {}
+    for hive, view, tag in ((winreg.HKEY_LOCAL_MACHINE, winreg.KEY_WOW64_64KEY, "HKLM"), (winreg.HKEY_LOCAL_MACHINE, winreg.KEY_WOW64_32KEY, "HKLM32"),
+                            (winreg.HKEY_CURRENT_USER, 0, "HKCU")):
+        try:
+            root = winreg.OpenKey(hive, UNINSTALL_SUBKEY, 0, winreg.KEY_READ | view)
+        except OSError:
+            continue
+        with root:
+            for i in range(winreg.QueryInfoKey(root)[0]):
+                try:
+                    sub = winreg.EnumKey(root, i)
+                    with winreg.OpenKey(root, sub, 0, winreg.KEY_READ | view) as sk:
+                        v = {}
+                        for nm in ("DisplayName", "DisplayVersion", "Publisher", "InstallDate", "InstallLocation", "UninstallString", "EstimatedSize",
+                                   "SystemComponent", "ParentKeyName", "ReleaseType"):
+                            try:
+                                v[nm] = winreg.QueryValueEx(sk, nm)[0]
+                            except OSError:
+                                pass
+                        lastw = winreg.QueryInfoKey(sk)[2]
+                except OSError:
+                    continue
+                name = str(v.get("DisplayName", "")).strip()
+                if not name or v.get("SystemComponent") == 1 or v.get("ParentKeyName") or str(v.get("ReleaseType", "")) in ("Update", "Hotfix", "Security Update"):
+                    continue
+                ts = lastw / 10_000_000 - 11644473600
+                d = str(v.get("InstallDate", ""))
+                if re.fullmatch(r"\d{8}", d):
+                    try:
+                        ts = time.mktime(time.strptime(d, "%Y%m%d"))
+                    except (ValueError, OverflowError):
+                        pass
+                try:
+                    size = int(v.get("EstimatedSize", 0)) * 1024
+                except (TypeError, ValueError):
+                    size = 0
+                out[f"{tag}|{sub}"] = {"id": f"{tag}|{sub}", "name": name, "version": str(v.get("DisplayVersion", "")), "publisher": str(v.get("Publisher", "")),
+                                       "location": str(v.get("InstallLocation", "")).strip('" '), "uninstall": str(v.get("UninstallString", "")),
+                                       "size": size, "ts": ts}
+    return out
+
+
+def _inst_snapshot():
+    """Cheap picture of everything an installer typically touches."""
+    import winreg
+    snap = {"dirs": {}, "run": {}, "shortcuts": set(), "services": set(), "tasks": set(), "reg": set()}
+    for root in _inst_roots():
+        try:
+            snap["dirs"][root] = set(os.listdir(root))
+        except OSError:
+            pass
+    for hive, hn in ((winreg.HKEY_LOCAL_MACHINE, "HKLM"), (winreg.HKEY_CURRENT_USER, "HKCU")):
+        for sub in (r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", r"SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce",
+                    r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run"):
+            try:
+                with winreg.OpenKey(hive, sub) as k:
+                    for i in range(winreg.QueryInfoKey(k)[1]):
+                        name, val, _ = winreg.EnumValue(k, i)
+                        snap["run"][f"{hn}\\{sub.rsplit(chr(92), 1)[-1]}\\{name}"] = str(val)[:300]
+            except OSError:
+                pass
+    for base in (os.path.join(os.environ.get("APPDATA", ""), "Microsoft", "Windows", "Start Menu", "Programs"),
+                 os.path.join(os.environ.get("ProgramData", ""), "Microsoft", "Windows", "Start Menu", "Programs")):
+        if os.path.isdir(base):
+            for dp, _, files in os.walk(base):
+                for f in files:
+                    if f.lower().endswith((".lnk", ".url")):
+                        snap["shortcuts"].add(os.path.relpath(os.path.join(dp, f), base))
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Services") as k:
+            snap["services"] = {winreg.EnumKey(k, i) for i in range(winreg.QueryInfoKey(k)[0])}
+    except OSError:
+        pass
+    tasks = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "Tasks")
+    try:
+        for dp, _, files in os.walk(tasks):
+            for f in files:
+                snap["tasks"].add(os.path.relpath(os.path.join(dp, f), tasks))
+    except OSError:
+        pass
+    for hive, path, label in ((winreg.HKEY_LOCAL_MACHINE, "SOFTWARE", "HKLM\\SOFTWARE"), (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node", "HKLM\\SOFTWARE\\WOW6432Node"),
+                              (winreg.HKEY_CURRENT_USER, "SOFTWARE", "HKCU\\SOFTWARE")):
+        try:
+            with winreg.OpenKey(hive, path) as k:
+                for i in range(winreg.QueryInfoKey(k)[0]):
+                    snap["reg"].add(label + "\\" + winreg.EnumKey(k, i))
+        except OSError:
+            pass
+    return snap
+
+
+def _inst_diff(old, new):
+    """What appeared between two snapshots."""
+    import winreg
+    fp = {"folders": [], "startup": [], "shortcuts": [], "services": [], "tasks": [], "registry": []}
+    for root, names in new["dirs"].items():
+        if root not in old["dirs"]:
+            continue
+        for n in sorted(names - old["dirs"][root]):
+            if n.lower() in INSTALL_NOISE or n.startswith("~") or n.lower().endswith(".tmp"):
+                continue
+            fp["folders"].append(os.path.join(root, n))
+    for k, v in new["run"].items():
+        if k not in old["run"]:
+            fp["startup"].append(f"{k} = {v}")
+    fp["shortcuts"] = sorted(new["shortcuts"] - old["shortcuts"])
+    for n in sorted(new["services"] - old["services"]):
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Services" + "\\" + n) as k:
+                try:
+                    disp = winreg.QueryValueEx(k, "DisplayName")[0]
+                except OSError:
+                    disp = n
+                try:
+                    img = winreg.QueryValueEx(k, "ImagePath")[0]
+                except OSError:
+                    img = ""
+            fp["services"].append(f"{n} - {disp} {img}".strip()[:200])
+        except OSError:
+            fp["services"].append(n)
+    fp["tasks"] = sorted(new["tasks"] - old["tasks"])
+    fp["registry"] = sorted(new["reg"] - old["reg"])
+    return {k: v[:60] for k, v in fp.items() if v}
+
+
+def _installer_procs():
+    out = []
+    me = os.getpid()
+    for p in psutil.process_iter(["pid", "name"]):
+        try:
+            nm = (p.info["name"] or "")
+            low = nm.lower()
+            if p.info["pid"] == me:
+                continue
+            if low == "msiexec.exe":
+                if " /v" in " ".join(p.cmdline()).lower():            # the always-running Windows Installer service
+                    continue
+            elif low.endswith(".tmp"):
+                if "\\is-" not in (p.exe() or "").lower():            # Inno Setup unpacks to ...\is-XXXX.tmp\
+                    continue
+            elif not INSTALLER_RX.match(nm):
+                continue
+            out.append({"pid": p.info["pid"], "name": nm})
+        except (psutil.Error, OSError):
+            continue
+    return out
+
+
+def _inst_log(kind, e, detail=None):
+    detail = detail or {}
+    with wlock:
+        cur = wdb.execute("INSERT INTO installs_log(ts,kind,pid,name,version,publisher,location,detail) VALUES(?,?,?,?,?,?,?,?)",
+                          (int(time.time()), kind, e["id"], e["name"], e["version"], e["publisher"], e["location"], json.dumps(detail)))
+        rid = cur.lastrowid
+        wdb.execute("DELETE FROM installs_log WHERE id < ?", (rid - 3000,))
+        wdb.commit()
+    verb = {"installed": "Installed", "updated": "Updated", "uninstalled": "Removed"}.get(kind, kind)
+    log_event("install", e["name"], f"{verb}{(' ' + e['version']) if e['version'] else ''}" + (f" (was {detail['old_version']})" if detail.get("old_version") else ""))
+    return rid
+
+
+def _inst_update(rid, **fields):
+    with wlock:
+        row = wdb.execute("SELECT detail FROM installs_log WHERE id=?", (rid,)).fetchone()
+        d = json.loads(row[0] or "{}") if row else {}
+        d.update(fields)
+        wdb.execute("UPDATE installs_log SET detail=? WHERE id=?", (json.dumps(d), rid))
+        wdb.commit()
+
+
+def _norm(s):
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+
+def _inst_leftovers(rid, entry):
+    """After an uninstall: what is still lying around (read-only report)."""
+    import winreg
+    left = []
+    nn, pn = _norm(re.sub(r"\(.*?\)|\bv?\d[\d.]*\b|x64|x86|64-bit|32-bit", "", entry["name"])), _norm(entry["publisher"])
+    if entry["location"] and os.path.isdir(entry["location"]):
+        left.append({"kind": "folder", "path": entry["location"]})
+    with wlock:                                                               # what we saw this program create
+        row = wdb.execute("SELECT detail FROM installs_log WHERE pid=? AND kind='installed' AND detail LIKE '%folders%' ORDER BY id DESC LIMIT 1", (entry["id"],)).fetchone()
+    if row:
+        for f in (json.loads(row[0] or "{}").get("footprint", {}).get("folders", [])):
+            if os.path.isdir(f) and not any(x["path"] == f for x in left if x["kind"] == "folder"):
+                left.append({"kind": "folder", "path": f})
+    for root in _inst_roots():
+        try:
+            for child in os.listdir(root):
+                c = _norm(child)
+                if c != "ramcapper" and len(c) >= 5 and len(nn) >= 5 and (c == nn or nn in c or (c in nn and len(c) >= 0.75 * len(nn))
+                                                                         or (len(pn) >= 5 and c == pn and nn[:4] in c)):
+                    full = os.path.join(root, child)
+                    if os.path.isdir(full) and not any(x.get("path") == full for x in left):
+                        left.append({"kind": "folder", "path": full})
+        except OSError:
+            pass
+    snap = _inst_snapshot()
+    for k, v in snap["run"].items():
+        if len(nn) >= 5 and nn in _norm(k + v):
+            left.append({"kind": "startup", "detail": f"{k} = {v}"})
+    for s_ in snap["shortcuts"]:
+        if len(nn) >= 5 and nn in _norm(s_):
+            left.append({"kind": "shortcut", "detail": s_})
+    for r_ in snap["reg"]:
+        c = _norm(r_.rsplit("\\", 1)[-1])
+        if len(c) >= 5 and len(nn) >= 5 and (c == nn or c == pn) and "microsoft" not in c:
+            left.append({"kind": "registry", "detail": r_})
+    _inst_update(rid, leftovers=left[:40])
+    if left:
+        log_event("install", entry["name"], f"Leftovers found after uninstall: {len(left)} item(s)")
+
+
+def _inst_changes(old, new, now):
+    s = Inst.session
+    for k in sorted(new.keys() - old.keys()):
+        e = new[k]
+        rid = _inst_log("installed", e)
+        if s:
+            s["added"].append(rid)
+        else:                                                               # silent / system installs: compare with a snapshot from a few minutes ago
+            base = _inst_base_snapshot()
+            threading.Timer(20, _inst_footprint_later, (rid, base)).start()
+    for k in sorted(old.keys() - new.keys()):
+        rid = _inst_log("uninstalled", old[k])
+        threading.Timer(20, _inst_leftovers, (rid, old[k])).start()
+    for k in sorted(new.keys() & old.keys()):
+        if new[k]["version"] != old[k]["version"] and new[k]["version"]:
+            _inst_log("updated", new[k], {"old_version": old[k]["version"]})
+
+
+_INST_SNAPS = deque(maxlen=24)
+
+
+def _inst_base_snapshot():
+    now = time.time()
+    older = [x for x in _INST_SNAPS if now - x[0] >= 45]
+    return older[0][1] if older else (_INST_SNAPS[0][1] if _INST_SNAPS else None)
+
+
+def _inst_footprint_later(rid, base):
+    try:
+        if base is not None:
+            _inst_update(rid, footprint=_inst_diff(base, _inst_snapshot()), approximate=True)
+    except Exception as ex:
+        print("install footprint error:", ex, file=sys.stderr)
+
+
+def _inst_loop():
+    while True:
+        time.sleep(INSTALL_SCAN_EVERY)
+        try:
+            if not module_on("installs"):
+                if Inst.on:
+                    Inst.on, Inst.primed, Inst.session = False, False, None
+                    Inst.installing, Inst.programs = [], {}
+                continue
+            now = time.time()
+            if not Inst.on:
+                Inst.on, Inst.primed = True, False
+            if now - Inst.last_snap > 30 or not _INST_SNAPS:
+                _INST_SNAPS.append((now, _inst_snapshot()))
+                Inst.last_snap = now
+            procs = _installer_procs()
+            Inst.installing = procs
+            if procs:
+                if Inst.session is None:
+                    Inst.session = {"t0": now, "base": _inst_snapshot(), "names": set(), "added": [], "last": now}
+                Inst.session["last"] = now
+                Inst.session["names"].update(p["name"] for p in procs)
+            progs = _read_programs()
+            if not Inst.primed:
+                Inst.programs, Inst.primed, Inst.scanned = progs, True, now          # what is installed right now is the baseline, not news
+                continue
+            _inst_changes(Inst.programs, progs, now)
+            Inst.programs, Inst.scanned = progs, now
+            s = Inst.session
+            if s and not procs and now - s["last"] > 25:                           # the installer has finished: record its footprint
+                Inst.session = None
+                fp = _inst_diff(s["base"], _inst_snapshot())
+                if s["added"]:
+                    for rid in s["added"]:
+                        _inst_update(rid, footprint=fp, installer=sorted(s["names"]))
+                elif fp:
+                    names = ", ".join(sorted(s["names"]))[:80]
+                    e = {"id": "installer|" + names, "name": f"Installer ran: {names}", "version": "", "publisher": "", "location": ""}
+                    _inst_log("installer", e, {"footprint": fp, "installer": sorted(s["names"])})
+        except Exception as ex:
+            print("install monitor error:", ex, file=sys.stderr)
+
+
+def installs_payload():
+    if not module_on("installs"):
+        return {"enabled": False}
+    recent = time.time() - 7 * 86400
+    progs = [{"id": e["id"], "name": e["name"], "version": e["version"], "publisher": e["publisher"], "location": e["location"],
+              "size": e["size"], "ts": e["ts"], "can_uninstall": bool(e["uninstall"]), "recent": e["ts"] > recent}
+             for e in Inst.programs.values()]
+    db = rdb()
+    try:
+        log = []
+        for r in db.execute("SELECT id,ts,kind,pid,name,version,publisher,location,detail FROM installs_log ORDER BY id DESC LIMIT 300"):
+            d = dict(r)
+            try:
+                d["detail"] = json.loads(d["detail"] or "{}")
+            except ValueError:
+                d["detail"] = {}
+            log.append(d)
+    finally:
+        db.close()
+    return {"enabled": True, "primed": Inst.primed, "scanned": Inst.scanned, "programs": progs, "log": log,
+            "installing": [p["name"] for p in Inst.installing]}
+
+
+def uninstall_program(pid):
+    e = Inst.programs.get(pid)
+    if not e or not e["uninstall"]:
+        raise RuntimeError("This program has no uninstaller registered with Windows.")
+    cmd = e["uninstall"].strip()
+    if re.match(r"(?i)^\"?msiexec(\.exe)?\"?\s+/i", cmd):
+        cmd = re.sub(r"(?i)/i", "/X", cmd, count=1)                           # Windows' own "uninstall" for MSI entries
+    subprocess.Popen(cmd, shell=True, creationflags=0x00000008 | 0x00000200, close_fds=True)
+    log_event("install", e["name"], "Started its uninstaller")
+
+
+def open_install_path(path):
+    p = os.path.abspath(path)
+    allowed = _inst_roots() + [e["location"] for e in Inst.programs.values() if e["location"]]
+    if not os.path.isdir(p) or not any(os.path.commonpath([p, os.path.abspath(a)]) == os.path.abspath(a) for a in allowed if a and os.path.isabs(a)
+                                       and os.path.splitdrive(a)[0].lower() == os.path.splitdrive(p)[0].lower()):
+        raise RuntimeError("That folder is not one RamCapper tracks.")
+    subprocess.Popen(["explorer", p])
 
 
 # ---------------------------------------------------------------- app icons
@@ -1756,6 +2130,8 @@ class Handler(BaseHTTPRequestHandler):
                                         "db_size": size, "frozen": FROZEN, "port": PORT, "version": VERSION, "minibar": pill_mode(), "notch_side": pill_side(), "notch_behavior": pill_behavior(),
                                         "notch_opacity": max(25, min(100, int(CFG.get("notch_opacity", 100)))), "window_maximized": bool(CFG.get("window_maximized", True)),
                                         "install": install_info()})
+            if u.path == "/api/installs":
+                return self._send(200, installs_payload())
             if u.path == "/api/install":
                 return self._send(200, install_info())
             if u.path == "/api/gpu":
@@ -1833,6 +2209,18 @@ class Handler(BaseHTTPRequestHandler):
                     Net.force_ident = True      # a manual scan re-identifies every device
                     threading.Thread(target=net_scan, daemon=True).start()
                 return self._send(200, {})
+            if path == "/api/installs/uninstall":
+                try:
+                    uninstall_program(str(body.get("id", "")))
+                except RuntimeError as e:
+                    return self._send(400, {"error": str(e)})
+                return self._send(200, {"ok": True})
+            if path == "/api/installs/open":
+                try:
+                    open_install_path(str(body.get("path", "")))
+                except (RuntimeError, ValueError) as e:
+                    return self._send(400, {"error": str(e)})
+                return self._send(200, {"ok": True})
             if path in ("/api/install", "/api/uninstall"):
                 if not FROZEN:
                     return self._send(400, {"error": "Installing is only available in the RamCapper.exe build."})
@@ -3630,6 +4018,7 @@ def main():
         pass
     atexit.register(release_caps)
     threading.Thread(target=sampler, daemon=True).start()
+    threading.Thread(target=_inst_loop, daemon=True).start()
     if ADMIN:
         threading.Thread(target=reapply_net_rules, daemon=True).start()
     try:
